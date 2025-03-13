@@ -1,0 +1,52 @@
+[package]
+name = "p2p-proxy"
+version = "1.0.0"
+edition = "2021"
+publish = false
+license = "MIT"
+
+[dependencies]
+async-trait = "0.1.86"
+blake3 = "1.5.5"
+futures = "0.3.30"
+hex = "0.4.3"
+libp2p = { version = "0.55", features = [
+  "macros",
+  "dcutr",
+  "ed25519",
+  "dns",
+  "identify",
+  "noise",
+  "tokio",
+  "tcp",
+  "request-response",
+  "relay",
+  "yamux",
+  "serde",
+] }
+libp2p-stream = { version = "0.3.0-alpha" }
+postcard = { version = "1.1.1", features = ["use-std"] }
+rand = "0.9"
+serde = { version = "1.0.217", features = ["derive"] }
+socks5-impl = { version = "0.6.1", features = ["serde", "tokio", "server"] }
+thiserror = "2"
+tokio = { version = "1.36.0", features = ["full"] }
+tracing = "0.1.40"
+tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
+uuid = { version = "1.12.1", features = ["v4", "fast-rng"] }
+bitping-swarm = { git = "ssh://git@gitlab.com/uptimesv/p2p-job-dispatcher.git", branch = "master", package = "bitping-swarm" }
+bitping-tcp-proxy = { git = "ssh://git@gitlab.com/uptimesv/p2p-job-dispatcher.git", branch = "master", package = "bitping-tcp-proxy" }
+protocols = { git = "ssh://git@gitlab.com/uptimesv/NATless-GRPC-Proxy.git", branch = "master", package = "protocols" }
+authenticator-service = { git = "ssh://git@gitlab.com/uptimesv/NATless-GRPC-Proxy.git", branch = "master", package = "authenticator-service" }
+tonic = { version = "0.11", features = [
+  "tls",
+  "gzip",
+  "tls-roots-common",
+  "tls-webpki-roots",
+] }
+base58-monero = { version ="2.0.0", features = ["check"] }
+sha2 = "0.10.8"
+figment = { version = "0.10.19", features = ["env", "yaml"] }
+toml = "0.8.20"
+ratatui = "0.29.0"
+color-eyre = "0.6.3"

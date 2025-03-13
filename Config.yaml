@@ -1,0 +1,5 @@
+destination_address: "/ip4/135.181.22.79/udp/31515/quic-v1/p2p/12D3KooWS6M2cP13vSHoPXVYbmYvhFgZowNrwyy7VkvbEUgXiXGZ/p2p-circuit/p2p/12D3KooWC3iW81qrVSaGPV7aErQtDGMYg7R9hobpS4euNDi9b56S"
+
+servers:
+  - protocol: Socks5
+    port: 4455
