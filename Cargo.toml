@@ -50,3 +50,6 @@ figment = { version = "0.10.19", features = ["env", "yaml"] }
 toml = "0.8.20"
 ratatui = "0.29.0"
 color-eyre = "0.6.3"
+metrics = "0.24.1"
+metrics-exporter-prometheus = "0.16.2"
+eyeball = { version = "0.8.8", features = ["async-lock"] }

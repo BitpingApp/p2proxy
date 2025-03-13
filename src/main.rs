@@ -1,15 +1,12 @@
 use std::{
-    borrow::{Borrow, Cow},
-    sync::{Arc, LazyLock},
-    time::Duration,
+    borrow::Cow,
+    collections::HashMap,
+    sync::{Arc, LazyLock, Mutex},
+    time::{Duration, Instant},
 };
 
-use bitping_tcp_proxy::{
-    bandwidth_reporter::{BandwidthReporterCodec, BandwidthReporterProtocol},
-    tcp_forwarder::node_forward,
-    TCP_PROXY_PROTOCOL,
-};
-use color_eyre::eyre::{self, bail, Context, Result};
+use bitping_tcp_proxy::bandwidth_reporter::{BandwidthReporterCodec, BandwidthReporterProtocol};
+use color_eyre::eyre::{bail, Context, Result};
 use config::Config;
 use futures::StreamExt;
 use libp2p::{
@@ -19,39 +16,32 @@ use libp2p::{
     noise, relay,
     request_response::{self, ProtocolSupport},
     swarm::{NetworkBehaviour, SwarmEvent},
-    tcp, tls, yamux, Multiaddr, PeerId, StreamProtocol,
+    tcp, yamux, Multiaddr, PeerId,
 };
 use libp2p_stream as stream;
+use metrics::gauge;
+use metrics_exporter_prometheus::PrometheusBuilder;
 use protocols::auth::v1::{
     authentication_service_client::AuthenticationServiceClient, FederatedApiTokenAuthRequest,
-    FederatedAuthenticateRequest,
 };
-use ratatui::{
-    crossterm::event::{self, Event},
-    DefaultTerminal, Frame,
-};
+use rand::Rng;
+use ratatui::{style::Color, widgets::ListState};
 use sha2::Digest;
-use socks_intermediary::run_socks_proxy;
-use tokio::{
-    select,
-    task::{futures::TaskLocalFuture, JoinSet, LocalSet},
-};
+use state::{ConnectionStatus, APP_STATE};
 use tonic::{
     codec::CompressionEncoding,
     transport::{Channel, ClientTlsConfig},
 };
-use tracing::{debug, error, info, level_filters::LevelFilter, warn};
-// use tracing::{error, info, level_filters::LevelFilter};
-use crate::wait_ext::SwarmWaitExt;
+use tracing::{debug, info, level_filters::LevelFilter, warn};
 use tracing_subscriber::EnvFilter;
 
-mod config;
-mod socks_intermediary;
-mod wait_ext;
+use utils::wait_ext::SwarmWaitExt;
 
-struct PeerState {
-    connected_peer: Option<PeerId>,
-}
+mod config;
+mod proxy_protocols;
+mod state;
+mod ui;
+mod utils;
 
 #[derive(NetworkBehaviour)]
 struct Behaviour {
@@ -103,34 +93,30 @@ pub fn get_grpc_channel(grpc_hub_url: String, grpc_hub_domain: String) -> Result
 static CONFIG: LazyLock<Config> =
     LazyLock::new(|| Config::new().expect("Cannot initialise config"));
 
-fn run(mut terminal: DefaultTerminal) -> Result<()> {
-    loop {
-        terminal.draw(render)?;
-        if matches!(event::read()?, Event::Key(_)) {
-            break Ok(());
-        }
-    }
-}
-
-fn render(frame: &mut Frame) {
-    frame.render_widget("hello world", frame.area());
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::builder()
-                .with_default_directive(LevelFilter::INFO.into())
+                .with_default_directive(LevelFilter::ERROR.into())
                 .from_env()?,
         )
         .pretty()
         .init();
 
     color_eyre::install()?;
-    let terminal = ratatui::init();
-    let result = run(terminal);
-    ratatui::restore();
+
+    ui::thread::run_thread();
+
+    let builder = PrometheusBuilder::new();
+    builder.install()?;
+
+    // Update connection status
+    {
+        APP_STATE.update(|state| {
+            state.connection_status = ConnectionStatus::Connecting;
+        });
+    }
 
     let destination_address = CONFIG.destination_address.clone();
 
@@ -171,6 +157,13 @@ async fn main() -> Result<()> {
         .with_behaviour(|k, rc| Behaviour::new(k.public(), rc))?
         .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_secs(u64::MAX)))
         .build();
+
+    // Store local peer ID in app state
+    {
+        let mut state = APP_STATE.lock().unwrap();
+        state.local_peer_id = Some(*swarm.local_peer_id());
+    }
+
     swarm.listen_on("/ip4/0.0.0.0/tcp/45445".parse()?)?;
     swarm.listen_on("/ip4/0.0.0.0/udp/45445/quic-v1".parse()?)?;
 
@@ -236,6 +229,12 @@ async fn main() -> Result<()> {
                 },
             )) = event
             {
+                // Store relay peer ID in app state
+                {
+                    let mut state = APP_STATE.lock().unwrap();
+                    state.relay_peer_id = Some(*relay_peer_id);
+                }
+
                 Some((*relay_peer_id, *renewal, *limit))
             } else {
                 None
@@ -286,27 +285,87 @@ async fn main() -> Result<()> {
 
     info!("Direct connection established with peer {}", peer_id);
 
-    // Now that we've got a solid connection to the Peer, we can start the proxy
+    // Update connection status
+    {
+        let mut state = APP_STATE.lock().unwrap();
+        state.connection_status = ConnectionStatus::Connected;
+    }
 
+    // Now that we've got a solid connection to the Peer, we can start the proxy
     info!("Starting SOCKS5 proxy for peer {}", peer_id);
-    tokio::spawn(run_socks_proxy(
+
+    // Use our wrapped version that tracks sessions
+    let socks_handle = tokio::spawn(proxy_protocols::socks::run_socks_proxy(
         &KEYPAIR,
         token,
         peer_id,
         swarm.behaviour().stream.new_control(),
     ));
 
+    // Main event loop
     loop {
-        // select! {
         if let Some(event) = swarm.next().await {
             match event {
-                // libp2p::swarm::SwarmEvent::NewListenAddr { address, .. } => {}
-                // libp2p::swarm::SwarmEvent::NewExternalAddrOfPeer { peer_id, address } => {
-                //     // swarm.dial(address)?
-                // }
-                event => tracing::info!(?event),
+                SwarmEvent::ConnectionEstablished {
+                    peer_id, endpoint, ..
+                } => {
+                    let mut state = APP_STATE.lock().unwrap();
+                    let address = endpoint.get_remote_address().clone();
+                    let is_relay = state.relay_peer_id.map_or(false, |id| peer_id == id);
+                    state.peers.insert(
+                        peer_id,
+                        PeerInfo {
+                            address,
+                            connected_at: Instant::now(),
+                            is_relay,
+                        },
+                    );
+                    state.connection_status = ConnectionStatus::Connected;
+                    info!("Connection established with peer: {}", peer_id);
+
+                    // Update metrics
+                    gauge!("p2proxy_peers_connected").set(state.peers.len() as f64);
+                }
+                SwarmEvent::ConnectionClosed { peer_id, .. } => {
+                    let mut state = APP_STATE.lock().unwrap();
+                    state.peers.remove(&peer_id);
+
+                    // Update connection status if all peers are gone
+                    if state.peers.is_empty() {
+                        state.connection_status = ConnectionStatus::Disconnected;
+                    }
+
+                    info!("Connection closed with peer: {}", peer_id);
+
+                    // Update metrics
+                    gauge!("p2proxy_peers_connected").set(state.peers.len() as f64);
+                }
+                SwarmEvent::NewListenAddr { address, .. } => {
+                    info!("Listening on: {}", address);
+                }
+                SwarmEvent::Behaviour(BehaviourEvent::Identify(identify::Event::Received {
+                    peer_id,
+                    info,
+                    ..
+                })) => {
+                    info!("Identified peer: {}", peer_id);
+                    for addr in &info.listen_addrs {
+                        info!("  Address: {}", addr);
+                    }
+                }
+                SwarmEvent::Behaviour(BehaviourEvent::Relay(
+                    relay::client::Event::ReservationReqAccepted {
+                        relay_peer_id,
+                        renewal,
+                        limit,
+                    },
+                )) => {
+                    info!("Relay reservation accepted: {}", relay_peer_id);
+                }
+                event => {
+                    debug!(?event, "Other event received");
+                }
             }
         }
-        // }
     }
 }
