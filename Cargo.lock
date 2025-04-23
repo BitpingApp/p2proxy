@@ -126,6 +126,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "anpa"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dbd042758b51a8f57b0e4777d1d14a49db0c0a04d2b21ceae3f64d7a066384b1"
+
+[[package]]
 name = "anyhow"
 version = "1.0.96"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -486,7 +492,7 @@ dependencies = [
 [[package]]
 name = "authenticator-service"
 version = "0.1.0"
-source = "git+ssh://git@gitlab.com/uptimesv/NATless-GRPC-Proxy.git?branch=master#cea38c17c9c241f0c43dad57a558ccb6bb5e920f"
+source = "git+ssh://git@gitlab.com/uptimesv/NATless-GRPC-Proxy.git?branch=master#c5a44585077656f0fb5dd3fabbffe5e7f13ceb49"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -494,6 +500,7 @@ dependencies = [
  "base58-monero 2.0.0",
  "blake3",
  "bon",
+ "bs58 0.5.1",
  "bsv",
  "chrono",
  "ed25519-compact",
@@ -676,6 +683,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8c3c1a368f70d6cf7302d78f8f7093da241fb8e8807c05cc9e51a125895a6d5b"
 
 [[package]]
+name = "better-panic"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6fa9e1d11a268684cbd90ed36370d7577afb6c62d912ddff5c15fc34343e5036"
+dependencies = [
+ "backtrace",
+ "console",
+]
+
+[[package]]
 name = "bimap"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -737,7 +754,7 @@ dependencies = [
 [[package]]
 name = "bitping-swarm"
 version = "0.1.0"
-source = "git+ssh://git@gitlab.com/uptimesv/p2p-job-dispatcher.git?branch=master#6e0500f76e73623e95732d0decedac98fa02de96"
+source = "git+ssh://git@gitlab.com/uptimesv/p2p-job-dispatcher.git?branch=master#9dd08ff362f6a4eff895f4218c19239c1d989e69"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -772,7 +789,7 @@ dependencies = [
 [[package]]
 name = "bitping-tcp-proxy"
 version = "0.1.0"
-source = "git+ssh://git@gitlab.com/uptimesv/p2p-job-dispatcher.git?branch=master#6e0500f76e73623e95732d0decedac98fa02de96"
+source = "git+ssh://git@gitlab.com/uptimesv/p2p-job-dispatcher.git?branch=master#9dd08ff362f6a4eff895f4218c19239c1d989e69"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -780,6 +797,7 @@ dependencies = [
  "base58-monero 2.0.0",
  "bitping-swarm",
  "blake3",
+ "bon",
  "futures",
  "hex",
  "libp2p",
@@ -936,6 +954,7 @@ version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf88ba1141d185c399bee5288d850d63b8369520c1eafc32a0430b5b6c287bf4"
 dependencies = [
+ "sha2 0.10.8",
  "tinyvec",
 ]
 
@@ -1011,6 +1030,12 @@ name = "byteorder"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
+
+[[package]]
+name = "byteorder-lite"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f1fe948ff07f4bd06c30984e69f5b4899c516a3ef74f34df92a2df2ab535495"
 
 [[package]]
 name = "bytes"
@@ -1217,10 +1242,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "colorsys"
+version = "0.6.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "54261aba646433cb567ec89844be4c4825ca92a4f8afba52fc4dd88436e31bbd"
+
+[[package]]
 name = "compact_str"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3b79c4069c6cad78e2e0cdfcbd26275770669fb39fd308a752dc110e83b9af32"
+dependencies = [
+ "castaway",
+ "cfg-if",
+ "itoa",
+ "rustversion",
+ "ryu",
+ "static_assertions",
+]
+
+[[package]]
+name = "compact_str"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3fdb1325a1cece981e8a296ab8f0f9b63ae357bd0784a9faaf548cc7b480707a"
 dependencies = [
  "castaway",
  "cfg-if",
@@ -1256,6 +1301,18 @@ dependencies = [
  "serde_json",
  "toml 0.5.11",
  "yaml-rust",
+]
+
+[[package]]
+name = "console"
+version = "0.15.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "054ccb5b10f9f2cbf51eb355ca1d05c2d279ce1804688d0db74b4733a5aeafd8"
+dependencies = [
+ "encode_unicode",
+ "libc",
+ "once_cell",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1401,6 +1458,7 @@ checksum = "829d955a0bb380ef178a640b91779e3987da38c9aea133b20614cfed8cdea9c6"
 dependencies = [
  "bitflags 2.8.0",
  "crossterm_winapi",
+ "futures-core",
  "mio",
  "parking_lot",
  "rustix",
@@ -1825,6 +1883,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
 
 [[package]]
+name = "encode_unicode"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "34aa73646ffb006b8f5147f3dc182bd4bcb190227ce861fc4a4844bf8e3cb2c0"
+
+[[package]]
 name = "enum-as-inner"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1901,19 +1965,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "eyeball"
-version = "0.8.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d93bd0ebf93d61d6332d3c09a96e97975968a44e19a64c947bde06e6baff383f"
-dependencies = [
- "futures-core",
- "readlock",
- "readlock-tokio",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
 name = "eyre"
 version = "0.6.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1939,6 +1990,15 @@ name = "fastrand"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "37909eebbb50d72f9059c3b6d82c0463f2ff062c9e95845c43a6c9c0355411be"
+
+[[package]]
+name = "fdeflate"
+version = "0.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e6853b52649d4ac5c0bd02320cddc5ba956bdb407c4b75a2c6b75bf51500f8c"
+dependencies = [
+ "simd-adler32",
+]
 
 [[package]]
 name = "ff"
@@ -2183,6 +2243,15 @@ dependencies = [
  "pin-project-lite",
  "pin-utils",
  "slab",
+]
+
+[[package]]
+name = "fxhash"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c31b6d751ae2c7f11320402d34e41349dd1016f8d5d45e48c4312bc8625af50c"
+dependencies = [
+ "byteorder",
 ]
 
 [[package]]
@@ -2991,6 +3060,20 @@ dependencies = [
  "tokio",
  "url",
  "xmltree",
+]
+
+[[package]]
+name = "image"
+version = "0.25.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd6f44aed642f18953a158afeb30206f4d50da59fbc66ecb53c66488de73563b"
+dependencies = [
+ "bytemuck",
+ "byteorder-lite",
+ "num-traits",
+ "png",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -4149,6 +4232,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8e3e04debbb59698c15bacbb6d93584a8c0ca9cc3213cb423d31f760d8843ce5"
 dependencies = [
  "adler2",
+ "simd-adler32",
 ]
 
 [[package]]
@@ -4166,7 +4250,7 @@ dependencies = [
 [[package]]
 name = "models"
 version = "0.1.0"
-source = "git+ssh://git@gitlab.com/uptimesv/NATless-GRPC-Proxy.git?branch=master#cea38c17c9c241f0c43dad57a558ccb6bb5e920f"
+source = "git+ssh://git@gitlab.com/uptimesv/NATless-GRPC-Proxy.git?branch=master#c5a44585077656f0fb5dd3fabbffe5e7f13ceb49"
 dependencies = [
  "anyhow",
  "base58-monero 1.0.0",
@@ -4556,17 +4640,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "p2p-proxy"
+name = "p2proxy"
 version = "1.0.0"
 dependencies = [
  "async-trait",
  "authenticator-service",
  "base58-monero 2.0.0",
+ "better-panic",
  "bitping-swarm",
  "bitping-tcp-proxy",
  "blake3",
+ "chrono",
  "color-eyre",
- "eyeball",
+ "crossterm",
  "figment",
  "futures",
  "hex",
@@ -4578,15 +4664,19 @@ dependencies = [
  "protocols",
  "rand 0.9.0",
  "ratatui",
+ "ratatui-splash-screen",
  "serde",
  "sha2 0.10.8",
  "socks5-impl",
+ "tachyonfx",
  "thiserror 2.0.11",
  "tokio",
+ "tokio-util",
  "toml 0.8.20",
  "tonic",
  "tracing",
  "tracing-subscriber",
+ "tui-logger",
  "uuid",
 ]
 
@@ -4887,6 +4977,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "953ec861398dccce10c670dfeaf3ec4911ca479e9c02154b3a215178c5f566f2"
 
 [[package]]
+name = "png"
+version = "0.17.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "82151a2fc869e011c153adc57cf2789ccb8d9906ce52c0b39a6b5697749d7526"
+dependencies = [
+ "bitflags 1.3.2",
+ "crc32fast",
+ "fdeflate",
+ "flate2",
+ "miniz_oxide 0.8.5",
+]
+
+[[package]]
 name = "polling"
 version = "3.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5135,7 +5238,7 @@ dependencies = [
 [[package]]
 name = "protocols"
 version = "0.1.0"
-source = "git+ssh://git@gitlab.com/uptimesv/NATless-GRPC-Proxy.git?branch=master#cea38c17c9c241f0c43dad57a558ccb6bb5e920f"
+source = "git+ssh://git@gitlab.com/uptimesv/NATless-GRPC-Proxy.git?branch=master#c5a44585077656f0fb5dd3fabbffe5e7f13ceb49"
 dependencies = [
  "anyhow",
  "glob",
@@ -5402,7 +5505,7 @@ checksum = "eabd94c2f37801c20583fc49dd5cd6b0ba68c716787c2dd6ed18571e1e63117b"
 dependencies = [
  "bitflags 2.8.0",
  "cassowary",
- "compact_str",
+ "compact_str 0.8.1",
  "crossterm",
  "indoc",
  "instability",
@@ -5413,6 +5516,17 @@ dependencies = [
  "unicode-segmentation",
  "unicode-truncate",
  "unicode-width 0.2.0",
+]
+
+[[package]]
+name = "ratatui-splash-screen"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "80deb90f97b9032cfa23d27e62110f194275f083895729abe447d60b4dca8588"
+dependencies = [
+ "image",
+ "ratatui",
+ "sha256",
 ]
 
 [[package]]
@@ -5454,21 +5568,6 @@ dependencies = [
  "ring 0.16.20",
  "time",
  "yasna",
-]
-
-[[package]]
-name = "readlock"
-version = "0.1.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "188bbae3aa4739bd264e9204da5919b2c91dd87dcce5049cf04bdf6aa17c5012"
-
-[[package]]
-name = "readlock-tokio"
-version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "29b1800712c0d75de4b0bda5483d46eaf8df757b81df5ca2bde53d5ac2e2c5b2"
-dependencies = [
- "tokio",
 ]
 
 [[package]]
@@ -6169,6 +6268,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha256"
+version = "1.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f880fc8562bdeb709793f00eb42a2ad0e672c4f883bbe59122b926eca935c8f6"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "hex",
+ "sha2 0.10.8",
+]
+
+[[package]]
 name = "sha3"
 version = "0.10.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6244,10 +6355,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "simd-adler32"
+version = "0.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d66dc143e6b11c1eddc06d5c423cfc97062865baf299914ab64caa38182078fe"
+
+[[package]]
 name = "simdutf8"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
+
+[[package]]
+name = "simple-easing"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "832ddd7df0d98d6fd93b973c330b7c8e0742d5cb8f1afc7dea89dba4d2531aa1"
 
 [[package]]
 name = "simple_asn1"
@@ -6792,6 +6915,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "tachyonfx"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc030256ccd5ef195fb767a12cdd41b6bbf9db4c08b11dcb6bf0ecee98fa0002"
+dependencies = [
+ "anpa",
+ "bon",
+ "colorsys",
+ "compact_str 0.9.0",
+ "ratatui",
+ "simple-easing",
+ "thiserror 2.0.11",
+]
+
+[[package]]
 name = "tagptr"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7241,6 +7379,23 @@ name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
+
+[[package]]
+name = "tui-logger"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c51f8ebd40b73a7102b069bf6a5ac63d8baba21b910db94042903e473c7ed3b4"
+dependencies = [
+ "chrono",
+ "fxhash",
+ "lazy_static",
+ "log",
+ "parking_lot",
+ "ratatui",
+ "tracing",
+ "tracing-subscriber",
+ "unicode-segmentation",
+]
 
 [[package]]
 name = "typeid"
@@ -8248,4 +8403,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.98",
+]
+
+[[package]]
+name = "zune-core"
+version = "0.4.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f423a2c17029964870cfaabb1f13dfab7d092a62a29a89264f4d36990ca414a"
+
+[[package]]
+name = "zune-jpeg"
+version = "0.4.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "99a5bab8d7dedf81405c4bb1f2b83ea057643d9cb28778cea9eecddeedd2e028"
+dependencies = [
+ "zune-core",
 ]

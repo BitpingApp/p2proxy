@@ -1,5 +1,10 @@
-destination_address: "/ip4/135.181.22.79/udp/31515/quic-v1/p2p/12D3KooWS6M2cP13vSHoPXVYbmYvhFgZowNrwyy7VkvbEUgXiXGZ/p2p-circuit/p2p/12D3KooWC3iW81qrVSaGPV7aErQtDGMYg7R9hobpS4euNDi9b56S"
+port: 45445
 
 servers:
   - protocol: Socks5
-    port: 4455
+    port: 1080
+    country: AU
+
+  # - protocol: Socks5
+  #   port: 4455
+  #   destination_peer: /p2p/12D3KooWC3iW81qrVSaGPV7aErQtDGMYg7R9hobpS4euNDi9b56S    

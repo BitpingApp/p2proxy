@@ -1,393 +1,323 @@
-use std::time::Duration;
-use std::time::Instant;
-
-use crate::gauge;
-use crate::AppState;
-use crate::BandwidthHistory;
-use crate::SocksSession;
-use crate::APP_STATE;
+use crate::events::Events;
 use color_eyre::eyre::Result;
-use crossterm::event;
-use crossterm::event::Event;
-use crossterm::event::KeyCode;
-use layout::*;
-use libp2p::PeerId;
-use metrics::histogram;
-use ratatui::*;
-use style::*;
-use widgets::*;
+use crossterm::{
+    event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode},
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+};
+use futures::StreamExt;
+use libp2p::quic::Connecting;
+use ratatui::{
+    prelude::*,
+    widgets::{
+        Axis, Block, Borders, Chart, Clear, Dataset, Gauge, List, ListItem, Paragraph, Tabs, Wrap,
+    },
+};
+use std::{
+    io, process,
+    time::{Duration, Instant},
+};
+use tokio::{select, sync::mpsc::Receiver, time::interval};
+use tracing::{debug, info};
+use ui_state::{ConnectionStatus, ProxySession, UIState};
 
-pub mod thread;
+mod logs;
+// mod network;
+mod overview;
+// mod sessions;
+mod splashscreen;
+mod ui_state;
 
-// Update metrics from app state
-fn update_metrics(state: &AppState) {
-    // Update gauges
-    gauge!("p2proxy_peers_connected").set(state.peers.len() as f64);
-    gauge!("p2proxy_socks_sessions_active").set(state.socks_sessions.len() as f64);
+// Colors inspired by Evangelion UI
+// NERV Command Center Purple - like the main HUD screens
+const PRIMARY: Color = Color::from_u32(0x523874); // Deep Purple
 
-    // Calculate total bytes
-    let total_sent: u64 = state.socks_sessions.iter().map(|s| s.bytes_sent).sum();
-    let total_received: u64 = state.socks_sessions.iter().map(|s| s.bytes_received).sum();
+// Eva Unit-01 Green - secondary color from Eva-01's armor
+const SECONDARY: Color = Color::from_u32(0xadf182); // Lime Green
 
-    // Update counters (using the difference from last update would be more accurate)
-    gauge!("p2proxy_bytes_sent").set(total_sent as f64);
-    gauge!("p2proxy_bytes_received").set(total_received as f64);
+// Eva Unit-02 Red - accent color from Asuka's Eva
+const ACCENT: Color = Color::from_u32(0xdc7d68); // Coral/Red
 
-    // Session durations
-    for session in &state.socks_sessions {
-        histogram!("p2proxy_session_duration_seconds")
-            .record(session.created_at.elapsed().as_secs_f64());
-    }
+// Terminal Dogma Gray - border color inspired by NERV HQ
+const BORDER: Color = Color::from_u32(0x916cad); // Lavender/Muted Purple
+
+// NERV Success Green - like positive sync ratio displays
+const SUCCESS: Color = Color::from_u32(0xc7fba5); // Mint Green
+
+// Angel Alert Red - emergency warning color
+const ERROR: Color = Color::from_u32(0xff5555); // Bright Red
+
+// LCL Orange - warning color like the LCL fluid
+const WARN: Color = Color::from_u32(0xffaa00); // Orange
+
+// SEELE Monolith Blue - miscellaneous color
+const MISC: Color = Color::from_u32(0x66ccff); // Light Blue
+const BACKGROUND: Color = Color::Reset;
+const FOREGROUND: Color = Color::Reset;
+
+pub struct Ui {
+    show_splash: bool,
+    splash_start_time: Instant,
+    show_logs: bool,
+    tab_index: usize,
+    tabs: Vec<&'static str>,
+    animation_start: Instant,
+    needs_render: bool,
+    is_animating: bool,
+
+    state: UIState,
 }
 
-fn render(frame: &mut Frame) {
-    let mut state = APP_STATE.lock().unwrap();
-
-    // Update metrics
-    update_metrics(&state);
-
-    // Create main layout
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(
-            [
-                Constraint::Length(7),  // Header with logo and status
-                Constraint::Length(1),  // Separator
-                Constraint::Length(10), // Sessions list
-                Constraint::Length(1),  // Separator
-                Constraint::Min(10),    // Bandwidth chart
-                Constraint::Length(1),  // Separator
-            ]
-            .as_ref(),
-        )
-        .split(frame.size());
-
-    // Header with logo and status
-    render_header(frame, chunks[0], &state);
-
-    // Separator
-    render_separator(frame, chunks[1]);
-
-    // Sessions list
-    render_sessions_list(frame, chunks[2], &mut state);
-
-    // Separator
-    render_separator(frame, chunks[3]);
-
-    // Bandwidth chart for selected session
-    render_bandwidth_chart(frame, chunks[4], &state);
-
-    // Separator
-    render_separator(frame, chunks[5]);
-}
-
-fn render_header(frame: &mut Frame, area: Rect, state: &AppState) {
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints(
-            [
-                Constraint::Percentage(70), // Logo
-                Constraint::Percentage(30), // Status
-            ]
-            .as_ref(),
-        )
-        .split(area);
-
-    // ASCII Art Logo
-    let logo = r#"
- ??????? ??????? ??????? ???????  ??????? ???  ??????   ???
- ????????????????????????????????????????????????????? ????
- ???????? ??????????????????????????   ??? ??????  ??????? 
- ??????? ??????? ??????????????? ???   ??? ??????   ?????  
- ???     ???????????  ??????     ????????????? ???   ???   
- ???     ???????????  ??????      ??????? ???  ???   ???   
-"#;
-
-    let logo_widget = Paragraph::new(logo)
-        .style(Style::default().fg(Color::Rgb(0, 255, 255)))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Rgb(0, 255, 255)))
-                .style(Style::default().bg(Color::Rgb(20, 20, 40))),
-        );
-
-    // Status widget
-    let status_text = format!(
-        "\nStatus: {}\n\nPeers: {}\nSessions: {}",
-        state.connection_status.as_str(),
-        state.peers.len(),
-        state.socks_sessions.len()
-    );
-
-    let status_widget = Paragraph::new(status_text)
-        .style(Style::default().fg(Color::Rgb(255, 255, 255)))
-        .block(
-            Block::default()
-                .title("Connection Info")
-                .title_style(
-                    Style::default()
-                        .fg(Color::Rgb(255, 0, 128))
-                        .add_modifier(Modifier::BOLD),
-                )
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Rgb(0, 255, 255)))
-                .style(Style::default().bg(Color::Rgb(20, 20, 40))),
-        );
-
-    frame.render_widget(logo_widget, chunks[0]);
-    frame.render_widget(status_widget, chunks[1]);
-}
-
-fn render_separator(frame: &mut Frame, area: Rect) {
-    let separator = Paragraph::new("?".repeat(area.width as usize))
-        .style(Style::default().fg(Color::Rgb(0, 255, 255)));
-
-    frame.render_widget(separator, area);
-}
-
-fn render_sessions_list(frame: &mut Frame, area: Rect, state: &mut AppState) {
-    // Create list items
-    let items: Vec<ListItem> = state
-        .socks_sessions
-        .iter()
-        .map(|session| {
-            let duration = session.created_at.elapsed();
-            let duration_text =
-                format!("{}m {}s", duration.as_secs() / 60, duration.as_secs() % 60);
-
-            let text = format!(
-                "Session: {} | Peer: {} | Duration: {} | Sent: {} KB | Received: {} KB",
-                session.id,
-                session.peer_id.to_string(),
-                duration_text,
-                session.bytes_sent / 1024,
-                session.bytes_received / 1024
-            );
-
-            ListItem::new(text)
-        })
-        .collect();
-
-    // Create list widget
-    let sessions_list = List::new(items)
-        .block(
-            Block::default()
-                .title("Active SOCKS5 Sessions")
-                .title_style(
-                    Style::default()
-                        .fg(Color::Rgb(255, 0, 128))
-                        .add_modifier(Modifier::BOLD),
-                )
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Rgb(0, 255, 255)))
-                .style(Style::default().bg(Color::Rgb(20, 20, 40))),
-        )
-        .highlight_style(
-            Style::default()
-                .bg(Color::Rgb(40, 40, 80))
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol(">> ");
-
-    // Render the list with state
-    frame.render_stateful_widget(sessions_list, area, &mut state.sessions_state);
-
-    // Update selected session index based on list state
-    state.selected_session_index = state.sessions_state.selected();
-}
-
-fn render_bandwidth_chart(frame: &mut Frame, area: Rect, state: &AppState) {
-    // Get selected session
-    let selected_session = state
-        .selected_session_index
-        .and_then(|i| state.socks_sessions.get(i));
-
-    let chart_block = Block::default()
-        .title(if selected_session.is_some() {
-            format!("Bandwidth Usage - Session {}", selected_session.unwrap().id)
-        } else {
-            "Bandwidth Usage - No Session Selected".to_string()
-        })
-        .title_style(
-            Style::default()
-                .fg(Color::Rgb(255, 0, 128))
-                .add_modifier(Modifier::BOLD),
-        )
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Rgb(0, 255, 255)))
-        .style(Style::default().bg(Color::Rgb(20, 20, 40)));
-
-    if let Some(session) = selected_session {
-        let upload_dataset = Dataset::default()
-            .name("Upload")
-            .marker(symbols::Marker::Braille)
-            .graph_type(GraphType::Line)
-            .style(Style::default().fg(Color::Rgb(0, 255, 128)))
-            .data(&session.bandwidth_history.upload_data);
-
-        let download_dataset = Dataset::default()
-            .name("Download")
-            .marker(symbols::Marker::Braille)
-            .graph_type(GraphType::Line)
-            .style(Style::default().fg(Color::Rgb(255, 0, 128)))
-            .data(&session.bandwidth_history.download_data);
-
-        // Find the max value for y-axis scaling
-        let max_upload = session
-            .bandwidth_history
-            .upload_data
-            .iter()
-            .map(|&(_, y)| y)
-            .fold(0.0, f64::max);
-
-        let max_download = session
-            .bandwidth_history
-            .download_data
-            .iter()
-            .map(|&(_, y)| y)
-            .fold(0.0, f64::max);
-
-        let max_value = f64::max(max_upload, max_download).max(1.0); // At least 1.0 to avoid empty chart
-
-        let bandwidth_chart = Chart::new([upload_dataset, download_dataset].to_vec())
-            .block(chart_block)
-            .x_axis(
-                Axis::default()
-                    .title("Time")
-                    // .title_style(Style::default().fg(Color::Rgb(255, 255, 0)))
-                    .style(Style::default().fg(Color::Rgb(255, 255, 0)))
-                    .bounds([
-                        session.bandwidth_history.time_counter
-                            - session.bandwidth_history.max_points as f64,
-                        session.bandwidth_history.time_counter,
-                    ])
-                    .labels(
-                        ["", "now"]
-                            .iter()
-                            .map(|s| s.to_string())
-                            .collect::<Vec<_>>(),
-                    ),
-            )
-            .y_axis(
-                Axis::default()
-                    .title("KB/s")
-                    // .title_style(Style::default().fg(Color::Rgb(255, 255, 0)))
-                    .style(Style::default().fg(Color::Rgb(255, 255, 0)))
-                    .bounds([0.0, max_value * 1.1]) // Add 10% padding at the top
-                    .labels(
-                        ["0", &format!("{:.1}", max_value)]
-                            .iter()
-                            .map(|s| s.to_string())
-                            .collect::<Vec<_>>(),
-                    ),
-            );
-
-        frame.render_widget(bandwidth_chart, area);
-    } else {
-        // No session selected, just show the empty block
-        frame.render_widget(chart_block, area);
-    }
-}
-
-// Update the run function to handle session selection and render at 300ms intervals
-pub fn run(mut terminal: DefaultTerminal) -> Result<()> {
-    // Set up a ticker for the render rate
-    let tick_rate = Duration::from_millis(300);
-    let mut last_tick = Instant::now();
-
-    loop {
-        // Render at the specified interval
-        let timeout = tick_rate
-            .checked_sub(last_tick.elapsed())
-            .unwrap_or_else(|| Duration::from_secs(0));
-
-        // Draw the UI if it's time to render
-        if last_tick.elapsed() >= tick_rate {
-            terminal.draw(render)?;
-            last_tick = Instant::now();
+impl Default for Ui {
+    fn default() -> Self {
+        Self {
+            show_splash: true,
+            splash_start_time: Instant::now(),
+            show_logs: false,
+            tab_index: 0,
+            tabs: vec!["OVERVIEW", "SESSIONS", "NETWORK", "LOGS"],
+            animation_start: Instant::now(),
+            needs_render: true,
+            is_animating: true,
+            state: UIState::new(),
         }
+    }
+}
 
-        // Poll for events with the remaining time until next render
-        if event::poll(timeout)? {
-            if let Event::Key(key) = event::read()? {
-                match key.code {
-                    KeyCode::Char('q') => break Ok(()),
-                    KeyCode::Down => {
-                        let mut state = APP_STATE.lock().unwrap();
-                        let sessions_len = state.socks_sessions.len();
+impl Ui {
+    pub fn new() -> Self {
+        Self::default()
+    }
 
-                        if sessions_len > 0 {
-                            let new_index = match state.sessions_state.selected() {
-                                Some(i) => {
-                                    if i >= sessions_len - 1 {
-                                        0
-                                    } else {
-                                        i + 1
-                                    }
-                                }
-                                None => 0,
-                            };
-                            state.sessions_state.select(Some(new_index));
+    pub fn mark_dirty(&mut self) {
+        self.needs_render = true;
+    }
+    pub fn mark_clean(&mut self) {
+        self.needs_render = false;
+    }
+
+    pub fn start_animation(&mut self) {
+        self.animation_start = Instant::now();
+        self.is_animating = true;
+    }
+
+    fn update_animation_state(&mut self) -> bool {
+        let progress = self.animation_progress();
+        if progress >= 1.0 && self.is_animating {
+            self.is_animating = false;
+            true // One final render needed
+        } else {
+            self.is_animating
+        }
+    }
+
+    pub fn toggle_logs(&mut self) {
+        self.show_logs = !self.show_logs;
+        self.start_animation()
+    }
+
+    pub fn next_tab(&mut self) {
+        self.tab_index = (self.tab_index + 1) % self.tabs.len();
+        self.start_animation();
+    }
+
+    // Main function that sets up and runs the UI
+    pub async fn run_ui(mut state_events: Receiver<Events>) -> Result<()> {
+        // Set up terminal
+        enable_raw_mode()?;
+        let mut stdout = io::stdout();
+        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+        let backend = CrosstermBackend::new(stdout);
+        let mut terminal = Terminal::new(backend)?;
+
+        // Create UI state
+        let mut ui = Ui::new();
+
+        let mut idle_interval = interval(Duration::from_millis(500)); // Slow background polling
+        let mut event_stream = EventStream::new();
+
+        ui.run_splash_screen_animation(&mut terminal).await;
+
+        // Main loop
+        loop {
+            select! {
+                _ = idle_interval.tick(), if !ui.is_animating => {
+                    ui.mark_dirty();
+                },
+                Some(event) = state_events.recv() => ui.handle_swarm_events(event),
+                Some(Ok(event)) = event_stream.next() => {
+                    if let Event::Key(key) = event {
+                        match key.code {
+                            KeyCode::Char('q') => {
+                                break;
+                            },
+                            KeyCode::Char('l') => ui.toggle_logs(),
+                            KeyCode::Tab => ui.next_tab(),
+                            KeyCode::BackTab => ui.previous_tab(),
+                            KeyCode::Up => {
+                                // Handle selection up - avoid holding lock for too long
+                                // APP_STATE.update(|state| {
+                                //     if let Some(index) = state.selected_session_index {
+                                //         if index > 0 && !state.socks_sessions.is_empty() {
+                                //             state.selected_session_index = Some(index - 1);
+                                //         }
+                                //     } else if !state.socks_sessions.is_empty() {
+                                //         state.selected_session_index = Some(0);
+                                //     }
+                                // }).await;
+                                ui.mark_dirty();
+                            }
+                            KeyCode::Down => {
+                                // Handle selection down - avoid holding lock for too long
+                                // APP_STATE.update(|state| {
+                                //     if let Some(index) = state.selected_session_index {
+                                //         if index + 1 < state.socks_sessions.len() {
+                                //             state.selected_session_index = Some(index + 1);
+                                //         }
+                                //     } else if !state.socks_sessions.is_empty() {
+                                //         state.selected_session_index = Some(0);
+                                //     }
+                                // }).await;
+                                ui.mark_dirty();
+                            }
+                            _ => {}
                         }
                     }
-                    KeyCode::Up => {
-                        let mut state = APP_STATE.lock().unwrap();
-                        let sessions_len = state.socks_sessions.len();
-
-                        if sessions_len > 0 {
-                            let new_index = match state.sessions_state.selected() {
-                                Some(i) => {
-                                    if i == 0 {
-                                        sessions_len - 1
-                                    } else {
-                                        i - 1
-                                    }
-                                }
-                                None => 0,
-                            };
-                            state.sessions_state.select(Some(new_index));
-                        }
-                    }
-                    _ => {}
                 }
+            };
+
+            if ui.needs_render || ui.is_animating {
+                terminal.draw(|f| {
+                    ui.render(f);
+                })?;
             }
         }
+
+        // Restore terminal
+        disable_raw_mode()?;
+        execute!(
+            terminal.backend_mut(),
+            LeaveAlternateScreen,
+            DisableMouseCapture
+        )?;
+        terminal.show_cursor()?;
+
+        process::exit(0)
     }
-}
 
-// Add this function to track SOCKS5 sessions
-pub fn track_socks_session(peer_id: PeerId, session_id: String) {
-    let mut state = APP_STATE.lock().unwrap();
-    state.socks_sessions.push(SocksSession {
-        id: session_id,
-        peer_id,
-        created_at: Instant::now(),
-        bytes_sent: 0,
-        bytes_received: 0,
-        bandwidth_history: BandwidthHistory::default(),
-    });
+    pub fn handle_swarm_events(&mut self, event: Events) {
+        debug!(?event, "Got new event");
+        match event {
+            Events::LocalPeerId(peer_id) => {
+                self.state.local_peer_id.replace(peer_id);
+            }
+            Events::Connection(connection_events) => match connection_events {
+                crate::events::ConnectionEvents::Connecting => {
+                    self.state.connection_status = ConnectionStatus::Connecting;
+                }
+                crate::events::ConnectionEvents::Connected(peer_id) => {
+                    self.state.connection_status = ConnectionStatus::Connected(peer_id);
+                }
+                crate::events::ConnectionEvents::Disconnected => {
+                    self.state.connection_status = ConnectionStatus::Disconnected;
+                }
+            },
+            Events::Session(session_events) => match session_events {
+                crate::events::SessionEvents::New(id, endpoint, peer_id) => {
+                    self.state.sessions.insert(
+                        id,
+                        ProxySession {
+                            id,
+                            peer_id,
+                            endpoint,
+                        },
+                    );
+                }
+                crate::events::SessionEvents::End(uuid) => {
+                    self.state.sessions.remove(&uuid);
+                }
+            },
+            Events::Bandwidth(bandwidth_events) => match bandwidth_events {
+                crate::events::BandwidthEvents::Upload(session_id, u) => {
+                    self.state.add_upload(u);
+                }
+                crate::events::BandwidthEvents::Download(session_id, d) => {
+                    self.state.add_download(d);
+                }
+            },
+        };
 
-    // Select the first session if none is selected
-    if state.sessions_state.selected().is_none() && !state.socks_sessions.is_empty() {
-        state.sessions_state.select(Some(0));
+        // self.mark_dirty();
     }
-}
 
-// Add this function to update SOCKS5 session stats
-pub fn update_socks_stats(session_id: &str, bytes_sent: u64, bytes_received: u64) {
-    let mut state = APP_STATE.lock().unwrap();
-    if let Some(session) = state.socks_sessions.iter_mut().find(|s| s.id == session_id) {
-        session.bytes_sent += bytes_sent;
-        session.bytes_received += bytes_received;
+    pub fn previous_tab(&mut self) {
+        if self.tab_index > 0 {
+            self.tab_index -= 1;
+        } else {
+            self.tab_index = self.tabs.len().saturating_sub(1);
+        }
+        self.start_animation();
+    }
+    // Calculate animation progress (0.0 to 1.0) for elements
+    fn animation_progress(&self) -> f32 {
+        let elapsed = self.animation_start.elapsed().as_millis() as f32;
+        let duration = 800.0; // Animation duration in ms
 
-        // Calculate bandwidth in KB/s (assuming this is called every second)
-        let upload_speed = bytes_sent as f64 / 1024.0;
-        let download_speed = bytes_received as f64 / 1024.0;
+        (elapsed / duration).min(1.0)
+    }
 
-        // Update bandwidth history
-        session
-            .bandwidth_history
-            .add_sample(upload_speed, download_speed);
+    // Apply easing function to animation progress
+    fn ease_out_expo(&self, progress: f32) -> f32 {
+        if progress >= 1.0 {
+            1.0
+        } else {
+            1.0 - 2.0f32.powf(-10.0 * progress)
+        }
+    }
+
+    pub fn render(&mut self, frame: &mut Frame<'_>) {
+        // Create the main layout
+        let size = frame.area();
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),                                   // Header with tabs
+                Constraint::Min(0),                                      // Main content
+                Constraint::Length(if self.show_logs { 10 } else { 3 }), // Footer/logs
+            ])
+            .split(size);
+
+        // Render tabs
+        self.render_tabs(frame, chunks[0]);
+
+        // Render main content based on selected tab
+        match self.tab_index {
+            0 => self.render_overview_tab(frame, chunks[1]),
+            // 1 => self.render_sessions_tab(frame, chunks[1], &state),
+            // 2 => self.render_network_tab(frame, chunks[1], &state),
+            3 => self.render_logs_tab(frame, chunks[1]),
+            _ => {}
+        }
+
+        // Render footer or logs
+        self.render_footer_or_logs(frame, chunks[2]);
+        self.mark_clean();
+    }
+
+    fn render_tabs(&mut self, frame: &mut Frame<'_>, area: Rect) {
+        let tabs = Tabs::new(self.tabs.clone())
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(SECONDARY))
+                    .title(" P2PROXY SYSTEM ")
+                    .title_alignment(Alignment::Center)
+                    .style(Style::default().bg(BACKGROUND)),
+            )
+            .select(self.tab_index)
+            .style(Style::default().fg(FOREGROUND))
+            .highlight_style(Style::default().fg(PRIMARY).add_modifier(Modifier::BOLD));
+
+        frame.render_widget(tabs, area);
     }
 }

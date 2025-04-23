@@ -1,5 +1,5 @@
 // socks_intermediary.rs
-use bitping_swarm::auth::Auth;
+use bitping_swarm::{auth::Auth, models::ProxySessionEvent};
 use bitping_tcp_proxy::{Session, SessionInit, SessionTransfer, TargetAddr, TCP_PROXY_PROTOCOL};
 use color_eyre::eyre::{self, Result};
 use futures::{
@@ -15,14 +15,18 @@ use std::{
     borrow::Cow,
     io,
     net::{SocketAddrV4, ToSocketAddrs},
+    time::Instant,
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _},
     net::TcpListener,
     select,
+    sync::mpsc::Sender,
 };
 use tracing::{error, info};
 use uuid::Uuid;
+
+use crate::events::{BandwidthEvents, Events, SessionEvents};
 
 struct TargetWrapper(TargetAddr);
 
@@ -89,15 +93,17 @@ async fn write_length_prefixed(
 
 pub async fn run_socks_proxy(
     local_keypair: &'static Keypair,
-    token: Cow<'_, str>,
+    token: String,
     peer: PeerId,
     control: stream::Control,
+    event_send: Sender<Events>,
 ) -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:1080").await?;
     info!("SOCKS5 proxy listening on 127.0.0.1:1080");
 
     let mut connection_count = 0;
 
+    let event_send = event_send.clone();
     loop {
         let (mut socket, addr) = listener.accept().await?;
         connection_count += 1;
@@ -106,7 +112,8 @@ pub async fn run_socks_proxy(
         let mut connection_control = control.clone();
         let connection_id = connection_count;
 
-        let token = token.to_string();
+        let token = token.clone();
+        let event_send = event_send.clone();
         tokio::spawn(async move {
             // SOCKS5 Handshake
             let request = match handshake::Request::retrieve_from_async_stream(&mut socket).await {
@@ -159,11 +166,11 @@ pub async fn run_socks_proxy(
                 }
             };
 
-            let session_id = Uuid::new_v4().to_string();
+            let session_id = Uuid::new_v4();
             // Send target address to peer
             let session_init = Session::Init(SessionInit {
-                id: session_id.clone(),
-                target_addr: target_addr.0,
+                id: session_id.to_string(),
+                target_addr: target_addr.0.clone(),
             });
 
             let request = Auth::new(session_init, local_keypair, token).unwrap();
@@ -182,13 +189,21 @@ pub async fn run_socks_proxy(
             let mut incoming_hasher = blake3::Hasher::new();
             let mut outgoing_hasher = blake3::Hasher::new();
 
+            let _ = event_send
+                .send(Events::Session(SessionEvents::New(
+                    session_id,
+                    target_addr.0,
+                    peer,
+                )))
+                .await;
+
             loop {
                 select! {
                     result = socket_read.read(&mut socket_buf) => match result {
                         Ok(0) => break,
                         Ok(n) => {
                             let transfer = Session::Transfer(SessionTransfer {
-                                id: session_id.clone(),
+                                id: session_id.to_string(),
                                 bytes: socket_buf[..n].to_vec(),
                             });
 
@@ -198,6 +213,14 @@ pub async fn run_socks_proxy(
                                     break;
                                 }
                                 outgoing_hasher.update(&socket_buf[..n]);
+                                let out_bytes_len = transfer_bytes.len();
+
+                                let _ = event_send
+                                    .send(Events::Bandwidth(BandwidthEvents::Upload(
+                                        session_id,
+                                        out_bytes_len as u64,
+                                    )))
+                                   .await;
                             }
                         }
                         Err(e) => {
@@ -207,9 +230,17 @@ pub async fn run_socks_proxy(
                     },
                     result = read_length_prefixed(&mut stream_read) => match result {
                         Ok(data) => {
+                            let in_bytes_len = data.len();
+                            let _ = event_send
+                                .send(Events::Bandwidth(BandwidthEvents::Download(
+                                    session_id,
+                                    in_bytes_len as u64,
+                                )))
+                                .await;
+
                             match postcard::from_bytes::<Session>(&data) {
                                 Ok(Session::Transfer(transfer)) => {
-                                    if transfer.id == session_id {
+                                    if transfer.id == session_id.to_string() {
                                         if let Err(e) = socket_write.write_all(&transfer.bytes).await {
                                             error!("Failed to write to client: {}", e);
                                             break;
@@ -246,7 +277,16 @@ pub async fn run_socks_proxy(
             let incoming_hash = hex::encode(incoming_hasher.finalize().as_bytes());
             let outgoing_hash = hex::encode(outgoing_hasher.finalize().as_bytes());
 
-            info!(session_id, incoming_hash, outgoing_hash, "Session finished");
+            let _ = event_send
+                .send(Events::Session(SessionEvents::End(session_id)))
+                .await;
+
+            info!(
+                ?session_id,
+                %incoming_hash,
+                %outgoing_hash,
+                "Session finished"
+            );
         });
     }
 }
