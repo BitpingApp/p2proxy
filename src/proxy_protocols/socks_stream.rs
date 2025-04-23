@@ -1,8 +1,11 @@
 // socks_stream.rs
-use bitping_tcp_proxy::{DataPhaseMessage, ProxySession, TargetAddr, TCP_PROXY_PROTOCOL};
+use bitping_tcp_proxy::{
+    bandwidth_reporter::BandwidthReport, DataPhaseMessage, ProxySession, TargetAddr,
+    TCP_PROXY_PROTOCOL,
+};
 use color_eyre::eyre::Result;
 use futures::{AsyncReadExt, AsyncWriteExt, Stream};
-use libp2p::{identity::Keypair, PeerId, Stream as LibP2pStream};
+use libp2p::{core::SignedEnvelope, identity::Keypair, PeerId, Stream as LibP2pStream};
 use libp2p_stream as p2p_stream;
 use socks5_impl::protocol::{
     handshake, Address, AsyncStreamOperation, AuthMethod, Reply, Request, Response,
@@ -48,6 +51,7 @@ pub enum SocksStreamMessage {
         session_id: Uuid,
         incoming_hash: String,
         outgoing_hash: String,
+        report: BandwidthReport,
     },
 }
 
@@ -89,18 +93,17 @@ impl Stream for SocksProxyStream {
     }
 }
 
-#[instrument(level = "warn", skip(server_config, control, token, local_keypair), fields(port = server_config.port))]
+#[instrument(level = "warn", skip_all, fields(port = server_config.port, peer))]
 pub async fn create_socks_proxy_stream(
     server_config: &'static Server,
     local_keypair: &'static Keypair,
     token: String,
     peer: PeerId,
     control: p2p_stream::Control,
-) -> Result<SocksProxyStream> {
+    sender: mpsc::Sender<SocksStreamMessage>,
+) -> Result<()> {
     let listener = TcpListener::bind(("localhost", server_config.port)).await?;
     info!("SOCKS5 proxy listening");
-
-    let (sender, receiver) = mpsc::channel(100);
 
     tokio::spawn(async move {
         let mut connection_count = 0;
@@ -145,7 +148,7 @@ pub async fn create_socks_proxy_stream(
         }
     });
 
-    Ok(SocksProxyStream { receiver })
+    Ok(())
 }
 
 #[instrument(level = "warn", skip_all, fields(peer, server_addr = ?socket.local_addr()))]
@@ -157,6 +160,11 @@ async fn handle_socks_connection(
     mut control: p2p_stream::Control,
     sender: Sender<SocksStreamMessage>,
 ) {
+    let session_id = Uuid::new_v4();
+    let mut incoming_bytes = 0;
+    let mut outgoing_bytes = 0;
+    let mut session_envelope_bytes: Option<Vec<u8>> = None;
+
     // SOCKS5 Handshake
     let request = match handshake::Request::retrieve_from_async_stream(&mut socket).await {
         Ok(r) => r,
@@ -243,25 +251,26 @@ async fn handle_socks_connection(
         }
     };
 
-    let session_id = Uuid::new_v4();
-
     // Create a proxy session for the client side
     let mut proxy_session = ProxySession::new_client_session(stream, peer, local_keypair);
 
     // Initialize the session with the target address
-    if let Err(e) = proxy_session
+    let signed_envelope = match proxy_session
         .client_init(session_id.to_string(), target_addr.0.clone(), token)
         .await
     {
-        let _ = sender
-            .send(SocksStreamMessage::Error {
-                session_id: Some(session_id),
-                error: format!("Failed to initialize session: {}", e),
-                stage: SessionStage::PeerConnection,
-            })
-            .await;
-        return;
-    }
+        Err(e) => {
+            let _ = sender
+                .send(SocksStreamMessage::Error {
+                    session_id: Some(session_id),
+                    error: format!("Failed to initialize session: {}", e),
+                    stage: SessionStage::PeerConnection,
+                })
+                .await;
+            return;
+        }
+        Ok(v) => v,
+    };
 
     // Notify stream initialization
     let _ = sender
@@ -302,10 +311,12 @@ async fn handle_socks_connection(
                     // Send data and report metrics immediately
                     match proxy_session.send_data(bytes_slice.to_vec()).await {
                         Ok(_) => {
+                            let bytes_len = bytes_slice.len();
+                            outgoing_bytes += bytes_len;
                             let _ = sender.send(SocksStreamMessage::DataTransferred {
                                 session_id,
                                 direction: DataDirection::Outgoing,
-                                bytes: n,
+                                bytes: bytes_len,
                             }).await;
                         },
                         Err(e) => {
@@ -357,6 +368,7 @@ async fn handle_socks_connection(
                                 }
 
                                 // Report metrics immediately
+                                incoming_bytes += bytes_len;
                                 let _ = sender.send(SocksStreamMessage::DataTransferred {
                                     session_id,
                                     direction: DataDirection::Incoming,
@@ -400,17 +412,46 @@ async fn handle_socks_connection(
     let _ = proxy_session.close().await;
     let _ = socket_write.shutdown().await;
 
-    let incoming_hash = hex::encode(incoming_hasher.finalize().as_bytes());
-    let outgoing_hash = hex::encode(outgoing_hasher.finalize().as_bytes());
+    let incoming_hash_bytes = incoming_hasher.finalize();
+    let outgoing_hash_bytes = outgoing_hasher.finalize();
 
-    // Send finished message
+    let incoming_hash = hex::encode(incoming_hash_bytes.as_bytes());
+    let outgoing_hash = hex::encode(outgoing_hash_bytes.as_bytes());
+
+    let report = match bitping_tcp_proxy::bandwidth_reporter::BandwidthReport::builder()
+        .incoming_hash(*incoming_hash_bytes.as_bytes())
+        .outgoing_hash(*outgoing_hash_bytes.as_bytes())
+        .incoming_byte_count(incoming_bytes)
+        .outgoing_byte_count(outgoing_bytes)
+        .peer_signed_envelope(signed_envelope)
+        .build()
+    {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = sender
+                .send(SocksStreamMessage::Error {
+                    session_id: Some(session_id),
+                    error: e.to_string(),
+                    stage: SessionStage::Shutdown,
+                })
+                .await;
+            return;
+        }
+    };
+
+    debug!(
+        ?session_id,
+        ?report,
+        "Session finished with bandwidth report",
+    );
+
+    // Send finished message with report
     let _ = sender
         .send(SocksStreamMessage::Finished {
             session_id,
             incoming_hash,
             outgoing_hash,
+            report,
         })
         .await;
-
-    debug!(?session_id, "Session finished");
 }

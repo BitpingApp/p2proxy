@@ -23,7 +23,9 @@ static GRPC_CHANNEL: LazyLock<Channel> = LazyLock::new(|| {
 
 pub fn get_grpc_channel(grpc_hub_url: String, grpc_hub_domain: String) -> Result<Channel> {
     let channel_config = if grpc_hub_url.starts_with("https://") {
-        let tls = ClientTlsConfig::new().domain_name(grpc_hub_domain);
+        let tls = ClientTlsConfig::new()
+            .with_enabled_roots()
+            .domain_name(grpc_hub_domain);
         Channel::builder(grpc_hub_url.try_into()?)
             .tls_config(tls)
             .context("Error configuring TLS for GRPC")?

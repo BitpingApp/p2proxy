@@ -26,8 +26,9 @@ use libp2p_stream as stream;
 use protocols::auth::v1::{
     authentication_service_client::AuthenticationServiceClient, FederatedApiTokenAuthRequest,
 };
+use protocols::models::v1::Requirements;
 use sha2::Digest;
-use tokio::sync::mpsc::Sender;
+use tokio::sync::mpsc::{self, Sender};
 use tonic::codec::CompressionEncoding;
 use tracing::{debug, info, warn};
 
@@ -69,12 +70,18 @@ pub struct AuthStep;
 pub struct NetworkConnect {
     pub token: String,
 }
+
 pub struct Bootstrapped {
     token: String,
     swarm: Swarm<Behaviour>,
     event_send: Sender<Events>,
     relay_address: Multiaddr,
     relay_peer_id: PeerId,
+
+    proxy_message_channel: (
+        mpsc::Sender<SocksStreamMessage>,
+        mpsc::Receiver<SocksStreamMessage>,
+    ),
 }
 
 pub struct ProxyForwarding {
@@ -228,6 +235,7 @@ impl ProxyNetwork<NetworkConnect> {
             event_send,
             relay_address,
             relay_peer_id,
+            proxy_message_channel: mpsc::channel(150),
         }))
     }
 }
@@ -282,65 +290,15 @@ impl ProxyNetwork<Bootstrapped> {
             "Connection established with destination peer"
         );
 
-        let socks_stream = proxy_protocols::socks_stream::create_socks_proxy_stream(
+        proxy_protocols::socks_stream::create_socks_proxy_stream(
             server,
             &KEYPAIR,
             self.0.token.to_string(),
             destination_peer_id,
             self.0.swarm.behaviour().stream.new_control(),
+            self.0.proxy_message_channel.0.clone(),
         )
         .await?;
-
-        // Use our wrapped version that tracks sessions
-        tokio::spawn(async move {
-            tokio::pin!(socks_stream);
-
-            while let Some(message) = socks_stream.next().await {
-                match message {
-                    SocksStreamMessage::Initialized {
-                        session_id,
-                        target_addr,
-                        peer,
-                    } => {
-                        debug!(
-                            "New session: {} to {:?} via {}",
-                            session_id, target_addr, peer
-                        );
-                    }
-                    SocksStreamMessage::DataTransferred {
-                        session_id,
-                        direction,
-                        bytes,
-                    } => {
-                        let dir_str = match direction {
-                            DataDirection::Incoming => "incoming",
-                            DataDirection::Outgoing => "outgoing",
-                        };
-                        debug!("Session {}: {} {} bytes", session_id, dir_str, bytes);
-                    }
-                    SocksStreamMessage::Error {
-                        session_id,
-                        error,
-                        stage,
-                    } => {
-                        warn!(
-                            "Error in session {:?} during {:?}: {}",
-                            session_id, stage, error
-                        );
-                    }
-                    SocksStreamMessage::Finished {
-                        session_id,
-                        incoming_hash,
-                        outgoing_hash,
-                    } => {
-                        debug!(
-                            "Session {} finished. Incoming hash: {}, Outgoing hash: {}",
-                            session_id, incoming_hash, outgoing_hash
-                        );
-                    }
-                }
-            }
-        });
 
         Ok(())
     }
@@ -371,8 +329,13 @@ impl ProxyNetwork<Bootstrapped> {
                 destination_peer.clone()
             }
         } else {
+            let mut node_reqs = Requirements::default();
+            if let Some(c) = &server.peer_options.country {
+                node_reqs.countries = vec![c.clone()];
+            }
+
             let request = Auth::new(
-                QueryRequest::FindNode(None, None, None),
+                QueryRequest::FindNode(Some(node_reqs), None, None),
                 &KEYPAIR,
                 self.0.token.clone(),
             )?;
@@ -430,76 +393,140 @@ impl ProxyNetwork<Bootstrapped> {
     pub async fn drive_network(mut self) -> Result<()> {
         // Main event loop
         loop {
-            if let Some(event) = self.0.swarm.next().await {
-                match event {
-                    SwarmEvent::ConnectionEstablished {
-                        peer_id, endpoint, ..
-                    } => {
-                        // APP_STATE
-                        //     .update(|state| {
-                        //         let address = endpoint.get_remote_address().clone();
-                        //         let is_relay = state.relay_peer_id == Some(peer_id);
-                        //         state.peers.insert(
-                        //             peer_id,
-                        //             PeerInfo {
-                        //                 address,
-                        //                 connected_at: Instant::now(),
-                        //                 is_relay,
-                        //             },
-                        //         );
-                        //         state.connection_status = ConnectionStatus::Connected;
-                        //         // Update metrics
-                        //         gauge!("p2proxy_peers_connected").set(state.peers.len() as f64);
-                        //     })
-                        //     .await;
+            tokio::select! {
+                Some(message) = self.0.proxy_message_channel.1.recv() => {
+                    match message {
+                         SocksStreamMessage::Initialized {
+                             session_id,
+                             target_addr,
+                             peer,
+                         } => {
+                             debug!(
+                                 "New session: {} to {:?} via {}",
+                                 session_id, target_addr, peer
+                             );
+                         }
+                         SocksStreamMessage::DataTransferred {
+                             session_id,
+                             direction,
+                             bytes,
+                         } => {
+                             let dir_str = match direction {
+                                 DataDirection::Incoming => "incoming",
+                                 DataDirection::Outgoing => "outgoing",
+                             };
+                             debug!("Session {}: {} {} bytes", session_id, dir_str, bytes);
+                         }
+                         SocksStreamMessage::Error {
+                             session_id,
+                             error,
+                             stage,
+                         } => {
+                             warn!(
+                                 "Error in session {:?} during {:?}: {}",
+                                 session_id, stage, error
+                             );
+                         }
+                         SocksStreamMessage::Finished {
+                             session_id,
+                             incoming_hash,
+                             outgoing_hash,
+                             report,
+                         } => {
+                             debug!(
+                                 ?session_id, ?incoming_hash, ?outgoing_hash, ?report,
+                                 "Session finished.",
+                             );
 
-                        info!("Connection established with peer: {}", peer_id);
-                    }
-                    SwarmEvent::ConnectionClosed { peer_id, .. } => {
-                        // APP_STATE
-                        //     .update(|state| {
-                        //         state.peers.remove(&peer_id);
-
-                        //         // Update connection status if all peers are gone
-                        //         if state.peers.is_empty() {
-                        //             state.connection_status = ConnectionStatus::Disconnected;
-                        //         }
-
-                        //         info!("Connection closed with peer: {}", peer_id);
-
-                        //         // Update metrics
-                        //         gauge!("p2proxy_peers_connected").set(state.peers.len() as f64);
-                        //     })
-                        //     .await;
-                    }
-                    SwarmEvent::NewListenAddr { address, .. } => {
-                        debug!("Listening on: {}", address);
-                    }
-                    SwarmEvent::Behaviour(BehaviourEvent::Identify(
-                        identify::Event::Received { peer_id, info, .. },
-                    )) => {
-                        debug!("Identified peer: {}", peer_id);
-                        for addr in &info.listen_addrs {
-                            debug!("  Address: {}", addr);
-                        }
-                    }
-                    SwarmEvent::Behaviour(BehaviourEvent::Relay(
-                        relay::client::Event::ReservationReqAccepted {
-                            relay_peer_id,
-                            renewal,
-                            limit,
-                        },
-                    )) => {
-                        debug!("Relay reservation accepted: {}", relay_peer_id);
-                    }
-                    SwarmEvent::Behaviour(BehaviourEvent::Dcutr(e)) => {
-                        info!(?e, "Dcutr event");
-                    }
-                    event => {
-                        debug!(?event, "Other event received");
-                    }
+                             let token = self.0.token.clone();
+                             if let Ok(authed_report) = Auth::new(report, &KEYPAIR, token) {
+                                 let authed_report = authed_report.clone();
+                                 self.0
+                                     .swarm
+                                     .behaviour_mut()
+                                     .bandwidth_reporter
+                                     .send_request(&self.0.relay_peer_id, authed_report);
+                             }
+                         }
+                     }
+                },
+                Some(event) = self.0.swarm.next() => {
+                    handle_swarm_events(event);
                 }
+            };
+        }
+    }
+}
+
+fn handle_swarm_events(event: SwarmEvent<BehaviourEvent>) {
+    match event {
+        SwarmEvent::ConnectionEstablished {
+            peer_id, endpoint, ..
+        } => {
+            // APP_STATE
+            //     .update(|state| {
+            //         let address = endpoint.get_remote_address().clone();
+            //         let is_relay = state.relay_peer_id == Some(peer_id);
+            //         state.peers.insert(
+            //             peer_id,
+            //             PeerInfo {
+            //                 address,
+            //                 connected_at: Instant::now(),
+            //                 is_relay,
+            //             },
+            //         );
+            //         state.connection_status = ConnectionStatus::Connected;
+            //         // Update metrics
+            //         gauge!("p2proxy_peers_connected").set(state.peers.len() as f64);
+            //     })
+            //     .await;
+
+            info!("Connection established with peer: {}", peer_id);
+        }
+        SwarmEvent::ConnectionClosed { peer_id, .. } => {
+            // APP_STATE
+            //     .update(|state| {
+            //         state.peers.remove(&peer_id);
+
+            //         // Update connection status if all peers are gone
+            //         if state.peers.is_empty() {
+            //             state.connection_status = ConnectionStatus::Disconnected;
+            //         }
+
+            //         info!("Connection closed with peer: {}", peer_id);
+
+            //         // Update metrics
+            //         gauge!("p2proxy_peers_connected").set(state.peers.len() as f64);
+            //     })
+            //     .await;
+        }
+        SwarmEvent::NewListenAddr { address, .. } => {
+            debug!("Listening on: {}", address);
+        }
+        SwarmEvent::Behaviour(BehaviourEvent::Identify(identify::Event::Received {
+            peer_id,
+            info,
+            ..
+        })) => {
+            debug!("Identified peer: {}", peer_id);
+            for addr in &info.listen_addrs {
+                debug!("  Address: {}", addr);
             }
+        }
+        SwarmEvent::Behaviour(BehaviourEvent::Relay(
+            relay::client::Event::ReservationReqAccepted {
+                relay_peer_id,
+                renewal,
+                limit,
+            },
+        )) => {
+            debug!("Relay reservation accepted: {}", relay_peer_id);
+        }
+        SwarmEvent::Behaviour(BehaviourEvent::Dcutr(e)) => {
+            info!(?e, "Dcutr event");
+        }
+        event => {
+            debug!(?event, "Other event received");
         }
     }
 }
