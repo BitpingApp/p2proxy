@@ -8,7 +8,7 @@ use crate::{proxy_protocols, GRPC_CHANNEL};
 use bitping_swarm::auth::Auth;
 use bitping_swarm::query::{QueryCodec, QueryProtocol, QueryRequest};
 use bitping_tcp_proxy::bandwidth_reporter::{BandwidthReporterCodec, BandwidthReporterProtocol};
-use color_eyre::eyre::{bail, eyre, Context, Result};
+use color_eyre::eyre::{bail, ensure, eyre, Context, Result};
 use color_eyre::owo_colors::OwoColorize;
 use futures::StreamExt;
 use libp2p::request_response::Message;
@@ -251,39 +251,59 @@ impl ProxyNetwork<Bootstrapped> {
             bail!("Couldnt connect to peer - no peerid");
         };
 
-        self.0
-            .swarm
-            .wait_for_with_timeout(
-                |s, event| {
-                    if let SwarmEvent::ConnectionEstablished {
-                        peer_id,
-                        connection_id,
-                        endpoint,
-                        num_established,
-                        concurrent_dial_errors,
-                        established_in,
-                    } = event
-                    {
-                        if destination_peer_id == *peer_id {
-                            info!(
-                                ?peer_id,
-                                ?connection_id,
-                                ?endpoint,
-                                ?num_established,
-                                ?concurrent_dial_errors,
-                                ?established_in,
-                                "Connected to destination peer"
-                            );
+        let mut retry_count = 0;
+        const MAX_RETRIES: usize = 5;
 
-                            return Some(());
+        loop {
+            match self
+                .0
+                .swarm
+                .wait_for_with_timeout(
+                    |s, event| {
+                        if let SwarmEvent::ConnectionEstablished {
+                            peer_id,
+                            connection_id,
+                            endpoint,
+                            num_established,
+                            concurrent_dial_errors,
+                            established_in,
+                        } = event
+                        {
+                            if destination_peer_id == *peer_id {
+                                info!(
+                                    ?peer_id,
+                                    ?connection_id,
+                                    ?endpoint,
+                                    ?num_established,
+                                    ?concurrent_dial_errors,
+                                    ?established_in,
+                                    "Connected to destination peer"
+                                );
+
+                                return Some(());
+                            }
                         }
-                    }
-                    None
-                },
-                Duration::from_secs(30),
-            )
-            .await
-            .context("Failed to connect with remote peer")?;
+                        None
+                    },
+                    Duration::from_secs(30),
+                )
+                .await
+            {
+                Ok(_) => break,
+                Err(_) => {
+                    retry_count += 1;
+                    ensure!(
+                        retry_count < MAX_RETRIES,
+                        "Failed to connect with remote peer after 5 attempts"
+                    );
+                    info!(
+                        "Connection attempt {}/{} failed, retrying...",
+                        retry_count, MAX_RETRIES
+                    );
+                    self.0.swarm.dial(destination_address.clone())?;
+                }
+            }
+        }
 
         info!(
             ?destination_peer_id,
