@@ -19,7 +19,10 @@ use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _, BufReader, BufWriter},
     net::TcpListener,
     select,
-    sync::mpsc::{self, Receiver, Sender},
+    sync::{
+        mpsc::{self, Receiver, Sender},
+        oneshot,
+    },
 };
 use tracing::{debug, error, info, instrument, warn};
 use uuid::Uuid;
@@ -30,7 +33,6 @@ use crate::config::Server;
 const SOCKET_BUF_SIZE: usize = 8196;
 
 // Stream message types that will be emitted
-#[derive(Debug, Clone)]
 pub enum SocksStreamMessage {
     Initialized {
         session_id: Uuid,
@@ -52,6 +54,10 @@ pub enum SocksStreamMessage {
         incoming_hash: String,
         outgoing_hash: String,
         report: BandwidthReport,
+    },
+    RequestNewPeer {
+        callback: oneshot::Sender<PeerId>,
+        server_config: &'static Server,
     },
 }
 
@@ -125,6 +131,7 @@ pub async fn create_socks_proxy_stream(
 
                     tokio::spawn(async move {
                         handle_socks_connection(
+                            server_config,
                             socket,
                             local_keypair,
                             connection_token,
@@ -153,10 +160,11 @@ pub async fn create_socks_proxy_stream(
 
 #[instrument(level = "warn", skip_all, fields(peer, server_addr = ?socket.local_addr()))]
 async fn handle_socks_connection(
+    server_config: &'static Server,
     mut socket: tokio::net::TcpStream,
     local_keypair: &'static Keypair,
     token: String,
-    peer: PeerId,
+    mut peer: PeerId,
     mut control: p2p_stream::Control,
     sender: Sender<SocksStreamMessage>,
 ) {
@@ -234,20 +242,56 @@ async fn handle_socks_connection(
     }
 
     // Connect to peer
-    let stream = match control.open_stream(peer, TCP_PROXY_PROTOCOL).await {
-        Ok(s) => s,
-        Err(e) => {
-            let _ = sender
-                .send(SocksStreamMessage::Error {
-                    session_id: None,
-                    error: format!("Failed to open stream to peer: {}", e),
-                    stage: SessionStage::PeerConnection,
-                })
-                .await;
+    let mut retry_count = 0;
+    let max_retries = 5;
 
+    let stream = loop {
+        if retry_count >= max_retries {
             let response = Response::new(Reply::GeneralFailure, Address::unspecified());
             let _ = response.write_to_async_stream(&mut socket).await;
             return;
+        }
+
+        // Try to connect
+        match control.open_stream(peer, TCP_PROXY_PROTOCOL).await {
+            Ok(s) => {
+                break s; // Success, break out of the loop
+            }
+            Err(e) => {
+                // Increment retry counter
+                retry_count += 1;
+
+                // Create oneshot channel for the response
+                let (tx, rx) = oneshot::channel();
+
+                // Request a new peer with the oneshot sender
+                let _ = sender
+                    .send(SocksStreamMessage::RequestNewPeer {
+                        callback: tx,
+                        server_config,
+                    })
+                    .await;
+
+                // Wait for the response
+                match rx.await {
+                    Ok(new_peer) => {
+                        // Update current peer and try again
+                        peer = new_peer;
+                        println!(
+                            "Retry attempt {}/{} with new peer",
+                            retry_count, max_retries
+                        );
+                    }
+                    Err(_) => {
+                        // Oneshot channel was dropped without sending a response
+                        println!(
+                            "Failed to get new peer on attempt {}/{}",
+                            retry_count, max_retries
+                        );
+                        // Continue the loop to retry with the same peer
+                    }
+                }
+            }
         }
     };
 

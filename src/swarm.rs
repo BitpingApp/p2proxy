@@ -29,6 +29,7 @@ use protocols::auth::v1::{
 use protocols::models::v1::Requirements;
 use sha2::Digest;
 use tokio::sync::mpsc::{self, Sender};
+use tokio::time::Timeout;
 use tonic::codec::CompressionEncoding;
 use tracing::{debug, info, warn};
 
@@ -64,7 +65,48 @@ impl Behaviour {
     }
 }
 
-pub static KEYPAIR: LazyLock<Keypair> = LazyLock::new(libp2p::identity::Keypair::generate_ed25519);
+pub static KEYPAIR: LazyLock<Keypair> = LazyLock::new(|| {
+    // Try to read keypair from file
+    let keypair_path = std::path::Path::new("node_keypair.bin");
+
+    if keypair_path.exists() {
+        // Load keypair from file
+        match std::fs::read(keypair_path) {
+            Ok(bytes) => match libp2p::identity::Keypair::from_protobuf_encoding(&bytes) {
+                Ok(keypair) => {
+                    debug!("Loaded existing keypair from disk");
+                    return keypair;
+                }
+                Err(e) => {
+                    warn!("Error deserializing keypair: {}, generating new one", e);
+                }
+            },
+            Err(e) => {
+                warn!("Error reading keypair file: {}, generating new one", e);
+            }
+        }
+    }
+
+    // Generate new keypair if we couldn't load one
+    let keypair = libp2p::identity::Keypair::generate_ed25519();
+
+    // Save the new keypair to disk
+    match keypair.to_protobuf_encoding() {
+        Ok(bytes) => {
+            if let Err(e) = std::fs::write(keypair_path, &bytes) {
+                warn!("Failed to save keypair to disk: {}", e);
+            } else {
+                debug!("Generated and saved new keypair to disk");
+            }
+        }
+        Err(e) => {
+            info!("Failed to serialize keypair: {}", e);
+        }
+    }
+
+    keypair
+});
+
 pub struct ProxyNetwork<T>(T);
 pub struct AuthStep;
 pub struct NetworkConnect {
@@ -242,24 +284,54 @@ impl ProxyNetwork<NetworkConnect> {
 
 impl ProxyNetwork<Bootstrapped> {
     pub async fn configure_server(&mut self, server: &'static Server) -> Result<()> {
-        let destination_address = self.discover_peer(server).await?;
+        let destination_peer_id = self.discover_and_connect_to_peer(server).await?;
 
-        // Now that we've got a solid connection to the Peer, we can start the proxy
-        self.0.swarm.dial(destination_address.clone())?;
+        info!(
+            ?destination_peer_id,
+            "Connection established with destination peer"
+        );
 
-        let Some(Protocol::P2p(destination_peer_id)) = destination_address.iter().last() else {
-            bail!("Couldnt connect to peer - no peerid");
-        };
+        proxy_protocols::socks_stream::create_socks_proxy_stream(
+            server,
+            &KEYPAIR,
+            self.0.token.to_string(),
+            destination_peer_id,
+            self.0.swarm.behaviour().stream.new_control(),
+            self.0.proxy_message_channel.0.clone(),
+        )
+        .await?;
 
+        Ok(())
+    }
+
+    async fn discover_and_connect_to_peer(
+        &mut self,
+        server: &Server,
+    ) -> Result<PeerId, color_eyre::eyre::Error> {
         let mut retry_count = 0;
-        const MAX_RETRIES: usize = 5;
+        const MAX_RETRIES: usize = 20;
+        let destination_peer_id = loop {
+            info!("Looking up peer");
+            let destination_address = match self.discover_peer(server).await {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!(?e, "Failed to discover peer");
+                    continue;
+                }
+            };
 
-        loop {
+            // Now that we've got a solid connection to the Peer, we can start the proxy
+            self.0.swarm.dial(destination_address.clone())?;
+
+            let Some(Protocol::P2p(destination_peer_id)) = destination_address.iter().last() else {
+                bail!("Couldnt connect to peer - no peerid");
+            };
+
             match self
                 .0
                 .swarm
                 .wait_for_with_timeout(
-                    |s, event| {
+                    move |s, event| {
                         if let SwarmEvent::ConnectionEstablished {
                             peer_id,
                             connection_id,
@@ -280,16 +352,16 @@ impl ProxyNetwork<Bootstrapped> {
                                     "Connected to destination peer"
                                 );
 
-                                return Some(());
+                                return Some(destination_peer_id);
                             }
                         }
                         None
                     },
-                    Duration::from_secs(30),
+                    Duration::from_secs(5),
                 )
                 .await
             {
-                Ok(_) => break,
+                Ok(v) => break v,
                 Err(_) => {
                     retry_count += 1;
                     ensure!(
@@ -297,30 +369,14 @@ impl ProxyNetwork<Bootstrapped> {
                         "Failed to connect with remote peer after 5 attempts"
                     );
                     info!(
-                        "Connection attempt {}/{} failed, retrying...",
-                        retry_count, MAX_RETRIES
+                        ?destination_address,
+                        "Connection attempt {}/{} failed, retrying...", retry_count, MAX_RETRIES
                     );
                     self.0.swarm.dial(destination_address.clone())?;
                 }
             }
-        }
-
-        info!(
-            ?destination_peer_id,
-            "Connection established with destination peer"
-        );
-
-        proxy_protocols::socks_stream::create_socks_proxy_stream(
-            server,
-            &KEYPAIR,
-            self.0.token.to_string(),
-            destination_peer_id,
-            self.0.swarm.behaviour().stream.new_control(),
-            self.0.proxy_message_channel.0.clone(),
-        )
-        .await?;
-
-        Ok(())
+        };
+        Ok(destination_peer_id)
     }
 
     async fn discover_peer(
@@ -370,31 +426,36 @@ impl ProxyNetwork<Bootstrapped> {
             let peer_id = self
                 .0
                 .swarm
-                .wait_for(|swarm, event| match event {
-                    SwarmEvent::Behaviour(BehaviourEvent::Query(
-                        request_response::Event::Message {
-                            peer,
-                            connection_id,
-                            message:
-                                Message::Response {
-                                    request_id,
-                                    response,
-                                },
+                .wait_for_with_timeout(
+                    move |swarm, event| match event {
+                        SwarmEvent::Behaviour(BehaviourEvent::Query(
+                            request_response::Event::Message {
+                                peer,
+                                connection_id,
+                                message:
+                                    Message::Response {
+                                        request_id,
+                                        response,
+                                    },
+                            },
+                        )) if *request_id == outbound_request_id => match response {
+                            bitping_swarm::query::QueryResponse::Error(e) => {
+                                Some(Err(eyre!(e.clone())))
+                            }
+                            bitping_swarm::query::QueryResponse::FindNode(peer_id) => {
+                                Some(Ok(*peer_id))
+                            }
+                            bitping_swarm::query::QueryResponse::FindNodes(hash_set) => {
+                                Some(Err(eyre!(
+                                    "Got wrong query response, expected FindNode, got: FindNodes"
+                                )))
+                            }
                         },
-                    )) if *request_id == outbound_request_id => match response {
-                        bitping_swarm::query::QueryResponse::Error(e) => {
-                            Some(Err(eyre!(e.clone())))
-                        }
-                        bitping_swarm::query::QueryResponse::FindNode(peer_id) => {
-                            Some(Ok(*peer_id))
-                        }
-                        bitping_swarm::query::QueryResponse::FindNodes(hash_set) => Some(Err(
-                            eyre!("Got wrong query response, expected FindNode, got: FindNodes"),
-                        )),
+                        _ => None,
                     },
-                    _ => None,
-                })
-                .await?;
+                    Duration::from_secs(5),
+                )
+                .await??;
 
             info!(?peer_id, "Successfully looked up destination peer");
 
@@ -415,66 +476,90 @@ impl ProxyNetwork<Bootstrapped> {
         loop {
             tokio::select! {
                 Some(message) = self.0.proxy_message_channel.1.recv() => {
-                    match message {
-                         SocksStreamMessage::Initialized {
-                             session_id,
-                             target_addr,
-                             peer,
-                         } => {
-                             debug!(
-                                 "New session: {} to {:?} via {}",
-                                 session_id, target_addr, peer
-                             );
-                         }
-                         SocksStreamMessage::DataTransferred {
-                             session_id,
-                             direction,
-                             bytes,
-                         } => {
-                             let dir_str = match direction {
-                                 DataDirection::Incoming => "incoming",
-                                 DataDirection::Outgoing => "outgoing",
-                             };
-                             debug!("Session {}: {} {} bytes", session_id, dir_str, bytes);
-                         }
-                         SocksStreamMessage::Error {
-                             session_id,
-                             error,
-                             stage,
-                         } => {
-                             warn!(
-                                 "Error in session {:?} during {:?}: {}",
-                                 session_id, stage, error
-                             );
-                         }
-                         SocksStreamMessage::Finished {
-                             session_id,
-                             incoming_hash,
-                             outgoing_hash,
-                             report,
-                         } => {
-                             debug!(
-                                 ?session_id, ?incoming_hash, ?outgoing_hash, ?report,
-                                 "Session finished.",
-                             );
-
-                             let token = self.0.token.clone();
-                             if let Ok(authed_report) = Auth::new(report, &KEYPAIR, token) {
-                                 let authed_report = authed_report.clone();
-                                 self.0
-                                     .swarm
-                                     .behaviour_mut()
-                                     .bandwidth_reporter
-                                     .send_request(&self.0.relay_peer_id, authed_report);
-                             }
-                         }
-                     }
+                    if let Err(e) = self.handle_proxy_events(message).await {
+                        warn!(?e, "Something went wrong handling proxy events");
+                    }
                 },
                 Some(event) = self.0.swarm.next() => {
                     handle_swarm_events(event);
                 }
             };
         }
+    }
+
+    async fn handle_proxy_events(&mut self, message: SocksStreamMessage) -> Result<()> {
+        match message {
+            SocksStreamMessage::Initialized {
+                session_id,
+                target_addr,
+                peer,
+            } => {
+                debug!(
+                    "New session: {} to {:?} via {}",
+                    session_id, target_addr, peer
+                );
+            }
+            SocksStreamMessage::DataTransferred {
+                session_id,
+                direction,
+                bytes,
+            } => {
+                let dir_str = match direction {
+                    DataDirection::Incoming => "incoming",
+                    DataDirection::Outgoing => "outgoing",
+                };
+                debug!("Session {}: {} {} bytes", session_id, dir_str, bytes);
+            }
+            SocksStreamMessage::Error {
+                session_id,
+                error,
+                stage,
+            } => {
+                warn!(
+                    "Error in session {:?} during {:?}: {}",
+                    session_id, stage, error
+                );
+            }
+            SocksStreamMessage::Finished {
+                session_id,
+                incoming_hash,
+                outgoing_hash,
+                report,
+            } => {
+                debug!(
+                    ?session_id,
+                    ?incoming_hash,
+                    ?outgoing_hash,
+                    ?report,
+                    "Session finished.",
+                );
+
+                let token = self.0.token.clone();
+                if let Ok(authed_report) = Auth::new(report, &KEYPAIR, token) {
+                    let authed_report = authed_report.clone();
+                    self.0
+                        .swarm
+                        .behaviour_mut()
+                        .bandwidth_reporter
+                        .send_request(&self.0.relay_peer_id, authed_report);
+                }
+            }
+            SocksStreamMessage::RequestNewPeer {
+                callback,
+                server_config,
+            } => match self.discover_and_connect_to_peer(server_config).await {
+                Ok(p) => {
+                    let _ = callback
+                        .send(p)
+                        .map_err(|p| eyre!("Failed to send new peer back to stream {p}"))?;
+                }
+                e => {
+                    let _ = e.wrap_err("Failed to discover peer after connection dropped")?;
+                }
+            },
+        }
+
+        Ok(())
     }
 }
 

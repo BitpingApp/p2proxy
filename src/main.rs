@@ -7,6 +7,7 @@ use swarm::ProxyNetwork;
 use tokio::task::JoinSet;
 use tonic::transport::{Channel, ClientTlsConfig};
 use tracing::level_filters::LevelFilter;
+use tracing_error::ErrorLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 mod config;
@@ -62,6 +63,7 @@ async fn main() -> Result<()> {
         tracing_subscriber::registry()
             .with(env_filter)
             .with(tui_logger::TuiTracingSubscriberLayer)
+            .with(ErrorLayer::default())
             .init();
         tui_logger::init_logger(tui_logger::LevelFilter::Info)?;
     } else {
@@ -75,6 +77,7 @@ async fn main() -> Result<()> {
             .with(env_filter)
             .with(tui_logger::TuiTracingSubscriberLayer)
             .with(fmt)
+            .with(ErrorLayer::default())
             .init();
     }
 

@@ -754,7 +754,7 @@ dependencies = [
 [[package]]
 name = "bitping-swarm"
 version = "0.1.0"
-source = "git+ssh://git@gitlab.com/uptimesv/p2p-job-dispatcher.git?branch=master#ebeb3e45ba5e749ab08a76d51c1e2dbb5e19a917"
+source = "git+ssh://git@gitlab.com/uptimesv/p2p-job-dispatcher.git?branch=master#04b258ec56634e70bc963e701950015d49a8dba1"
 dependencies = [
  "async-trait",
  "base58-monero 2.0.0",
@@ -789,7 +789,7 @@ dependencies = [
 [[package]]
 name = "bitping-tcp-proxy"
 version = "0.1.0"
-source = "git+ssh://git@gitlab.com/uptimesv/p2p-job-dispatcher.git?branch=master#ebeb3e45ba5e749ab08a76d51c1e2dbb5e19a917"
+source = "git+ssh://git@gitlab.com/uptimesv/p2p-job-dispatcher.git?branch=master#04b258ec56634e70bc963e701950015d49a8dba1"
 dependencies = [
  "async-trait",
  "authenticator-service",
@@ -4681,6 +4681,7 @@ dependencies = [
  "toml 0.8.20",
  "tonic",
  "tracing",
+ "tracing-error",
  "tracing-subscriber",
  "tui-logger",
  "uuid",
