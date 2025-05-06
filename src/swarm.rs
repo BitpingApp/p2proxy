@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::{sync::LazyLock, time::Duration};
 
 use crate::config::Server;
@@ -31,7 +32,7 @@ use sha2::Digest;
 use tokio::sync::mpsc::{self, Sender};
 use tokio::time::Timeout;
 use tonic::codec::CompressionEncoding;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, instrument, warn};
 
 #[derive(NetworkBehaviour)]
 struct Behaviour {
@@ -277,7 +278,7 @@ impl ProxyNetwork<NetworkConnect> {
             event_send,
             relay_address,
             relay_peer_id,
-            proxy_message_channel: mpsc::channel(150),
+            proxy_message_channel: mpsc::channel(1000),
         }))
     }
 }
@@ -310,28 +311,47 @@ impl ProxyNetwork<Bootstrapped> {
     ) -> Result<PeerId, color_eyre::eyre::Error> {
         let mut retry_count = 0;
         const MAX_RETRIES: usize = 20;
-        let destination_peer_id = loop {
-            info!("Looking up peer");
-            let destination_address = match self.discover_peer(server).await {
-                Ok(v) => v,
+
+        while retry_count < MAX_RETRIES {
+            info!(
+                "Looking up peer (attempt {}/{})",
+                retry_count + 1,
+                MAX_RETRIES
+            );
+
+            // 1. Discover peers
+            let destination_addresses = match self.discover_peer(server).await {
+                Ok(addresses) => {
+                    if addresses.is_empty() {
+                        warn!("No peer addresses discovered");
+                        retry_count += 1;
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        continue;
+                    }
+                    addresses
+                }
                 Err(e) => {
                     warn!(?e, "Failed to discover peer");
+                    retry_count += 1;
+                    tokio::time::sleep(Duration::from_secs(1)).await;
                     continue;
                 }
             };
 
-            // Now that we've got a solid connection to the Peer, we can start the proxy
-            self.0.swarm.dial(destination_address.clone())?;
+            // 2. Dial all peers
+            for addr in destination_addresses {
+                match self.0.swarm.dial(addr.clone()) {
+                    Ok(_) => info!(?addr, "Dialing peer"),
+                    Err(e) => warn!(?e, ?addr, "Failed to dial peer"),
+                }
+            }
 
-            let Some(Protocol::P2p(destination_peer_id)) = destination_address.iter().last() else {
-                bail!("Couldnt connect to peer - no peerid");
-            };
-
+            // 3. Wait for any ConnectionEstablished event
             match self
                 .0
                 .swarm
                 .wait_for_with_timeout(
-                    move |s, event| {
+                    |_, event| {
                         if let SwarmEvent::ConnectionEstablished {
                             peer_id,
                             connection_id,
@@ -341,54 +361,50 @@ impl ProxyNetwork<Bootstrapped> {
                             established_in,
                         } = event
                         {
-                            if destination_peer_id == *peer_id {
-                                info!(
-                                    ?peer_id,
-                                    ?connection_id,
-                                    ?endpoint,
-                                    ?num_established,
-                                    ?concurrent_dial_errors,
-                                    ?established_in,
-                                    "Connected to destination peer"
-                                );
-
-                                return Some(destination_peer_id);
-                            }
+                            info!(
+                                ?peer_id,
+                                ?connection_id,
+                                ?endpoint,
+                                ?num_established,
+                                ?concurrent_dial_errors,
+                                ?established_in,
+                                "Connected to peer"
+                            );
+                            return Some(*peer_id);
                         }
                         None
                     },
-                    Duration::from_secs(5),
+                    Duration::from_secs(10),
                 )
                 .await
             {
-                Ok(v) => break v,
+                Ok(peer_id) => return Ok(peer_id),
                 Err(_) => {
+                    warn!("Connection timeout reached");
                     retry_count += 1;
-                    ensure!(
-                        retry_count < MAX_RETRIES,
-                        "Failed to connect with remote peer after 5 attempts"
-                    );
-                    info!(
-                        ?destination_address,
-                        "Connection attempt {}/{} failed, retrying...", retry_count, MAX_RETRIES
-                    );
-                    self.0.swarm.dial(destination_address.clone())?;
                 }
             }
-        };
-        Ok(destination_peer_id)
+        }
+
+        bail!(
+            "Failed to connect with any peer after {} attempts",
+            MAX_RETRIES
+        );
     }
 
+    #[instrument(skip(self))]
     async fn discover_peer(
         &mut self,
         server: &Server,
-    ) -> Result<Multiaddr, color_eyre::eyre::Error> {
-        let destination_address: Multiaddr = if let Some(destination_peer) =
+    ) -> Result<HashSet<Multiaddr>, color_eyre::eyre::Error> {
+        let destination_address = if let Some(destination_peer) =
             &server.peer_options.destination_peer
         {
             if let Some(Protocol::P2p(_)) = destination_peer.iter().next() {
+                info!("Trying to connect to destination peer");
                 // Case 1: It starts with a P2p protocol, append it to the relay address
-                self.0
+                HashSet::from_iter(vec![self
+                    .0
                     .relay_address
                     .clone()
                     .with(Protocol::P2pCircuit)
@@ -399,10 +415,10 @@ impl ProxyNetwork<Bootstrapped> {
                             unreachable!()
                         },
                     )
-                    .unwrap()
+                    .unwrap()])
             } else {
                 // Case 2: It's a fully formed multiaddr that doesn't start with P2p, use it directly
-                destination_peer.clone()
+                HashSet::from_iter(vec![destination_peer.clone()])
             }
         } else {
             let mut node_reqs = Requirements::default();
@@ -411,7 +427,12 @@ impl ProxyNetwork<Bootstrapped> {
             }
 
             let request = Auth::new(
-                QueryRequest::FindNode(Some(node_reqs), None, None),
+                QueryRequest::FindNodes {
+                    requirements: Some(node_reqs),
+                    exclusions: None,
+                    capabilities: None,
+                    limit: 25,
+                },
                 &KEYPAIR,
                 self.0.token.clone(),
             )?;
@@ -423,7 +444,7 @@ impl ProxyNetwork<Bootstrapped> {
                 .query
                 .send_request(&self.0.relay_peer_id, request);
 
-            let peer_id = self
+            let peer_ids = self
                 .0
                 .swarm
                 .wait_for_with_timeout(
@@ -443,12 +464,12 @@ impl ProxyNetwork<Bootstrapped> {
                                 Some(Err(eyre!(e.clone())))
                             }
                             bitping_swarm::query::QueryResponse::FindNode(peer_id) => {
-                                Some(Ok(*peer_id))
+                                Some(Err(eyre!(
+                                    "Got wrong query response, expected FindNodes, got: FindNode"
+                                )))
                             }
                             bitping_swarm::query::QueryResponse::FindNodes(hash_set) => {
-                                Some(Err(eyre!(
-                                    "Got wrong query response, expected FindNode, got: FindNodes"
-                                )))
+                                Some(Ok(hash_set.clone()))
                             }
                         },
                         _ => None,
@@ -457,16 +478,22 @@ impl ProxyNetwork<Bootstrapped> {
                 )
                 .await??;
 
-            info!(?peer_id, "Successfully looked up destination peer");
+            info!(?peer_ids, "Successfully looked up destination peer");
 
             // Case 3: No destination peer specified, use the peer_id from query
             // TODO: No unwraps
-            self.0
-                .relay_address
-                .clone()
-                .with(Protocol::P2pCircuit)
-                .with_p2p(peer_id)
-                .unwrap()
+
+            peer_ids
+                .into_iter()
+                .filter_map(|peer_id| {
+                    self.0
+                        .relay_address
+                        .clone()
+                        .with(Protocol::P2pCircuit)
+                        .with_p2p(peer_id)
+                        .ok()
+                })
+                .collect::<HashSet<Multiaddr>>()
         };
         Ok(destination_address)
     }
