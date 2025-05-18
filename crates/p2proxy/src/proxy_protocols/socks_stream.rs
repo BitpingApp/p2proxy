@@ -7,6 +7,7 @@ use color_eyre::eyre::Result;
 use futures::{AsyncReadExt, AsyncWriteExt, Stream};
 use libp2p::{core::SignedEnvelope, identity::Keypair, PeerId, Stream as LibP2pStream};
 use libp2p_stream as p2p_stream;
+use metrics::{counter, gauge, histogram};
 use socks5_impl::protocol::{
     handshake, Address, AsyncStreamOperation, AuthMethod, Reply, Request, Response,
 };
@@ -109,6 +110,8 @@ pub async fn create_socks_proxy_stream(
     sender: mpsc::Sender<SocksStreamMessage>,
 ) -> Result<()> {
     let listener = TcpListener::bind(("localhost", server_config.port)).await?;
+    counter!("p2proxy_socks_server_started_total").increment(1);
+    gauge!("p2proxy_socks_servers_active").increment(1.0);
     info!("SOCKS5 proxy listening");
 
     tokio::spawn(async move {
@@ -118,6 +121,8 @@ pub async fn create_socks_proxy_stream(
             match listener.accept().await {
                 Ok((socket, addr)) => {
                     connection_count += 1;
+                    counter!("p2proxy_socks_connections_total").increment(1);
+                    gauge!("p2proxy_socks_connections_active").increment(1.0);
                     debug!("Accepted connection {} from {}", connection_count, addr);
 
                     // Set TCP_NODELAY to reduce latency
@@ -140,9 +145,12 @@ pub async fn create_socks_proxy_stream(
                             connection_sender,
                         )
                         .await;
+                        // Decrement active connections when handler finishes
+                        gauge!("p2proxy_socks_connections_active").decrement(1.0);
                     });
                 }
                 Err(e) => {
+                    counter!("p2proxy_socks_accept_errors_total").increment(1);
                     let _ = sender
                         .send(SocksStreamMessage::Error {
                             session_id: None,
@@ -177,6 +185,7 @@ async fn handle_socks_connection(
     let request = match handshake::Request::retrieve_from_async_stream(&mut socket).await {
         Ok(r) => r,
         Err(e) => {
+            counter!("p2proxy_socks_handshake_errors_total").increment(1);
             let _ = sender
                 .send(SocksStreamMessage::Error {
                     session_id: None,
@@ -189,6 +198,7 @@ async fn handle_socks_connection(
     };
 
     if !request.evaluate_method(AuthMethod::NoAuth) {
+        counter!("p2proxy_socks_auth_method_errors_total").increment(1);
         let response = handshake::Response::new(AuthMethod::NoAcceptableMethods);
         let _ = response.write_to_async_stream(&mut socket).await;
         let _ = sender
@@ -203,6 +213,7 @@ async fn handle_socks_connection(
 
     let response = handshake::Response::new(AuthMethod::NoAuth);
     if let Err(e) = response.write_to_async_stream(&mut socket).await {
+        counter!("p2proxy_socks_handshake_response_errors_total").increment(1);
         let _ = sender
             .send(SocksStreamMessage::Error {
                 session_id: None,
@@ -217,6 +228,7 @@ async fn handle_socks_connection(
     let request = match Request::retrieve_from_async_stream(&mut socket).await {
         Ok(r) => r,
         Err(e) => {
+            counter!("p2proxy_socks_request_errors_total").increment(1);
             let _ = sender
                 .send(SocksStreamMessage::Error {
                     session_id: None,
@@ -231,6 +243,7 @@ async fn handle_socks_connection(
     let target_addr: TargetWrapper = request.address.clone().into();
     let response = Response::new(Reply::Succeeded, request.address);
     if let Err(e) = response.write_to_async_stream(&mut socket).await {
+        counter!("p2proxy_socks_response_errors_total").increment(1);
         let _ = sender
             .send(SocksStreamMessage::Error {
                 session_id: None,
@@ -240,6 +253,8 @@ async fn handle_socks_connection(
             .await;
         return;
     }
+
+    counter!("p2proxy_socks_connections_established_total").increment(1);
 
     // Connect to peer
     let mut retry_count = 0;
@@ -342,6 +357,7 @@ async fn handle_socks_connection(
             result = socket_read.read(&mut socket_buf) => match result {
                 Ok(0) => {
                     debug!("Client closed connection, sending close signal");
+                    counter!("p2proxy_socks_client_closed_total").increment(1);
                     let _ = proxy_session.send_close().await;
                     break;
                 },
@@ -357,6 +373,7 @@ async fn handle_socks_connection(
                         Ok(_) => {
                             let bytes_len = bytes_slice.len();
                             outgoing_bytes += bytes_len;
+                            histogram!("p2proxy_outgoing_chunk_size_bytes").record(bytes_len as f64);
                             let _ = sender.send(SocksStreamMessage::DataTransferred {
                                 session_id,
                                 direction: DataDirection::Outgoing,
@@ -364,6 +381,7 @@ async fn handle_socks_connection(
                             }).await;
                         },
                         Err(e) => {
+                            counter!("p2proxy_data_send_errors_total").increment(1);
                             let _ = sender.send(SocksStreamMessage::Error {
                                 session_id: Some(session_id),
                                 error: format!("Failed to write to peer: {}", e),
@@ -374,6 +392,7 @@ async fn handle_socks_connection(
                     }
                 }
                 Err(e) => {
+                    counter!("p2proxy_socket_read_errors_total").increment(1);
                     let _ = sender.send(SocksStreamMessage::Error {
                         session_id: Some(session_id),
                         error: format!("Failed to read from client: {}", e),
@@ -390,9 +409,11 @@ async fn handle_socks_connection(
                                 // Update hash before writing
                                 incoming_hasher.update(&transfer.bytes);
                                 let bytes_len = transfer.bytes.len();
+                                histogram!("p2proxy_incoming_chunk_size_bytes").record(bytes_len as f64);
 
                                 // Write data to socket
                                 if let Err(e) = socket_write.write_all(&transfer.bytes).await {
+                                    counter!("p2proxy_socket_write_errors_total").increment(1);
                                     let _ = sender.send(SocksStreamMessage::Error {
                                         session_id: Some(session_id),
                                         error: format!("Failed to write to client: {}", e),
@@ -403,6 +424,7 @@ async fn handle_socks_connection(
 
                                 // Flush after each write to prevent hanging
                                 if let Err(e) = socket_write.flush().await {
+                                    counter!("p2proxy_socket_flush_errors_total").increment(1);
                                     let _ = sender.send(SocksStreamMessage::Error {
                                         session_id: Some(session_id),
                                         error: format!("Failed to flush client write: {}", e),
@@ -421,6 +443,7 @@ async fn handle_socks_connection(
                             }
                         }
                         DataPhaseMessage::Error(err) => {
+                            counter!("p2proxy_peer_data_errors_total").increment(1);
                             let _ = sender.send(SocksStreamMessage::Error {
                                 session_id: Some(session_id),
                                 error: format!("Received error message: {}", err),
@@ -430,6 +453,7 @@ async fn handle_socks_connection(
                         },
                         DataPhaseMessage::Close(id) => {
                             if id == session_id.to_string() {
+                                counter!("p2proxy_peer_closed_total").increment(1);
                                 debug!("Received close signal from server");
                                 // Acknowledge the close by sending our own close if we haven't already
                                 let _ = proxy_session.send_close().await;
@@ -439,6 +463,7 @@ async fn handle_socks_connection(
                     }
                 }
                 Err(e) => {
+                    counter!("p2proxy_peer_read_errors_total").increment(1);
                     let _ = sender.send(SocksStreamMessage::Error {
                         session_id: Some(session_id),
                         error: format!("Failed to read from peer: {}", e),
@@ -462,6 +487,9 @@ async fn handle_socks_connection(
     let incoming_hash = hex::encode(incoming_hash_bytes.as_bytes());
     let outgoing_hash = hex::encode(outgoing_hash_bytes.as_bytes());
 
+    counter!("p2proxy_sessions_finished_total").increment(1);
+    gauge!("p2proxy_bytes_transferred_total").increment((incoming_bytes + outgoing_bytes) as f64);
+
     let report = match bitping_tcp_proxy::bandwidth_reporter::BandwidthReport::builder()
         .incoming_hash(*incoming_hash_bytes.as_bytes())
         .outgoing_hash(*outgoing_hash_bytes.as_bytes())
@@ -472,6 +500,7 @@ async fn handle_socks_connection(
     {
         Ok(v) => v,
         Err(e) => {
+            counter!("p2proxy_bandwidth_report_errors_total").increment(1);
             let _ = sender
                 .send(SocksStreamMessage::Error {
                     session_id: Some(session_id),

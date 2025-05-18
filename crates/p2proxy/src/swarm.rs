@@ -24,6 +24,7 @@ use libp2p::{
     tcp, yamux, PeerId, Swarm,
 };
 use libp2p_stream as stream;
+use metrics::{counter, gauge};
 use models::events::Events;
 use protocols::auth::v1::{
     authentication_service_client::AuthenticationServiceClient, FederatedApiTokenAuthRequest,
@@ -522,6 +523,7 @@ impl ProxyNetwork<Bootstrapped> {
                 target_addr,
                 peer,
             } => {
+                counter!("p2proxy_sessions_initialized_total").increment(1);
                 debug!(
                     "New session: {} to {:?} via {}",
                     session_id, target_addr, peer
@@ -532,6 +534,15 @@ impl ProxyNetwork<Bootstrapped> {
                 direction,
                 bytes,
             } => {
+                match direction {
+                    DataDirection::Incoming => {
+                        counter!("p2proxy_download_bytes_total").increment(bytes as u64);
+                    }
+                    DataDirection::Outgoing => {
+                        counter!("p2proxy_upload_bytes_total").increment(bytes as u64);
+                    }
+                };
+                
                 let dir_str = match direction {
                     DataDirection::Incoming => "incoming",
                     DataDirection::Outgoing => "outgoing",
@@ -543,6 +554,7 @@ impl ProxyNetwork<Bootstrapped> {
                 error,
                 stage,
             } => {
+                counter!("p2proxy_session_errors_total").increment(1);
                 warn!(
                     "Error in session {:?} during {:?}: {}",
                     session_id, stage, error
@@ -554,6 +566,7 @@ impl ProxyNetwork<Bootstrapped> {
                 outgoing_hash,
                 report,
             } => {
+                counter!("p2proxy_sessions_completed_total").increment(1);
                 debug!(
                     ?session_id,
                     ?incoming_hash,
@@ -565,6 +578,7 @@ impl ProxyNetwork<Bootstrapped> {
                 let token = self.0.token.clone();
                 if let Ok(authed_report) = Auth::new(report, &KEYPAIR, token) {
                     let authed_report = authed_report.clone();
+                    counter!("p2proxy_bandwidth_reports_sent_total").increment(1);
                     self.0
                         .swarm
                         .behaviour_mut()
@@ -575,14 +589,19 @@ impl ProxyNetwork<Bootstrapped> {
             SocksStreamMessage::RequestNewPeer {
                 callback,
                 server_config,
-            } => match self.discover_and_connect_to_peer(server_config).await {
-                Ok(p) => {
-                    let _ = callback
-                        .send(p)
-                        .map_err(|p| eyre!("Failed to send new peer back to stream {p}"))?;
-                }
-                e => {
-                    let _ = e.wrap_err("Failed to discover peer after connection dropped")?;
+            } => {
+                counter!("p2proxy_peer_requests_total").increment(1);
+                match self.discover_and_connect_to_peer(server_config).await {
+                    Ok(p) => {
+                        counter!("p2proxy_peer_discoveries_successful_total").increment(1);
+                        let _ = callback
+                            .send(p)
+                            .map_err(|p| eyre!("Failed to send new peer back to stream {p}"))?;
+                    }
+                    e => {
+                        counter!("p2proxy_peer_discoveries_failed_total").increment(1);
+                        let _ = e.wrap_err("Failed to discover peer after connection dropped")?;
+                    }
                 }
             },
         }
@@ -596,44 +615,20 @@ fn handle_swarm_events(event: SwarmEvent<BehaviourEvent>) {
         SwarmEvent::ConnectionEstablished {
             peer_id, endpoint, ..
         } => {
-            // APP_STATE
-            //     .update(|state| {
-            //         let address = endpoint.get_remote_address().clone();
-            //         let is_relay = state.relay_peer_id == Some(peer_id);
-            //         state.peers.insert(
-            //             peer_id,
-            //             PeerInfo {
-            //                 address,
-            //                 connected_at: Instant::now(),
-            //                 is_relay,
-            //             },
-            //         );
-            //         state.connection_status = ConnectionStatus::Connected;
-            //         // Update metrics
-            //         gauge!("p2proxy_peers_connected").set(state.peers.len() as f64);
-            //     })
-            //     .await;
+            // Add connection metrics
+            counter!("p2proxy_peer_connections_total").increment(1);
+            gauge!("p2proxy_peers_connected").increment(1.0);
 
             info!("Connection established with peer: {}", peer_id);
         }
         SwarmEvent::ConnectionClosed { peer_id, .. } => {
-            // APP_STATE
-            //     .update(|state| {
-            //         state.peers.remove(&peer_id);
-
-            //         // Update connection status if all peers are gone
-            //         if state.peers.is_empty() {
-            //             state.connection_status = ConnectionStatus::Disconnected;
-            //         }
-
-            //         info!("Connection closed with peer: {}", peer_id);
-
-            //         // Update metrics
-            //         gauge!("p2proxy_peers_connected").set(state.peers.len() as f64);
-            //     })
-            //     .await;
+            // Update connected peers metric
+            gauge!("p2proxy_peers_connected").decrement(1.0);
+            
+            info!("Connection closed with peer: {}", peer_id);
         }
         SwarmEvent::NewListenAddr { address, .. } => {
+            counter!("p2proxy_listen_addresses_total").increment(1);
             debug!("Listening on: {}", address);
         }
         SwarmEvent::Behaviour(BehaviourEvent::Identify(identify::Event::Received {
@@ -641,6 +636,7 @@ fn handle_swarm_events(event: SwarmEvent<BehaviourEvent>) {
             info,
             ..
         })) => {
+            counter!("p2proxy_peer_identified_total").increment(1);
             debug!("Identified peer: {}", peer_id);
             for addr in &info.listen_addrs {
                 debug!("  Address: {}", addr);
@@ -653,9 +649,11 @@ fn handle_swarm_events(event: SwarmEvent<BehaviourEvent>) {
                 limit,
             },
         )) => {
+            counter!("p2proxy_relay_reservations_total").increment(1);
             debug!("Relay reservation accepted: {}", relay_peer_id);
         }
         SwarmEvent::Behaviour(BehaviourEvent::Dcutr(e)) => {
+            counter!("p2proxy_dcutr_events_total").increment(1);
             info!(?e, "Dcutr event");
         }
         event => {

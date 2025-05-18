@@ -71,8 +71,14 @@ async fn main() -> Result<()> {
 
     color_eyre::install()?;
 
+    // Setup prometheus metrics exporter
     let builder = PrometheusBuilder::new();
-    builder.install()?;
+    builder
+        .with_http_listener(([0, 0, 0, 0], 9091))
+        .add_global_label("service", "p2proxy")
+        .install()?;
+
+    tracing::info!("Metrics server running on http://0.0.0.0:9091/metrics");
 
     let (tx, rx) = tokio::sync::mpsc::channel(100);
 
