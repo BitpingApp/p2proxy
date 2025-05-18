@@ -1,0 +1,12 @@
+[package]
+name = "models"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+remoc = { workspace = true }
+tokio.workspace = true
+serde.workspace = true
+bitping-tcp-proxy.workspace = true
+libp2p.workspace = true
+uuid.workspace = true

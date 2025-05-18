@@ -1,4 +1,3 @@
-use crate::events::Events;
 use color_eyre::eyre::Result;
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode},
@@ -6,7 +5,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use futures::StreamExt;
-use libp2p::quic::Connecting;
+use models::{events::Events, Counter, CounterClient};
 use ratatui::{
     prelude::*,
     widgets::{
@@ -14,12 +13,16 @@ use ratatui::{
     },
 };
 use std::{
-    io, process,
+    io,
+    net::Ipv4Addr,
+    process,
     time::{Duration, Instant},
 };
-use tokio::{select, sync::mpsc::Receiver, time::interval};
+use tokio::{net::TcpStream, select, sync::mpsc::Receiver, time::interval};
 use tracing::{debug, info};
 use ui_state::{ConnectionStatus, ProxySession, UIState};
+
+use remoc::ConnectExt;
 
 mod logs;
 // mod network;
@@ -212,18 +215,18 @@ impl Ui {
                 self.state.local_peer_id.replace(peer_id);
             }
             Events::Connection(connection_events) => match connection_events {
-                crate::events::ConnectionEvents::Connecting => {
+                models::events::ConnectionEvents::Connecting => {
                     self.state.connection_status = ConnectionStatus::Connecting;
                 }
-                crate::events::ConnectionEvents::Connected(peer_id) => {
+                models::events::ConnectionEvents::Connected(peer_id) => {
                     self.state.connection_status = ConnectionStatus::Connected(peer_id);
                 }
-                crate::events::ConnectionEvents::Disconnected => {
+                models::events::ConnectionEvents::Disconnected => {
                     self.state.connection_status = ConnectionStatus::Disconnected;
                 }
             },
             Events::Session(session_events) => match session_events {
-                crate::events::SessionEvents::New(id, endpoint, peer_id) => {
+                models::events::SessionEvents::New(id, endpoint, peer_id) => {
                     self.state.sessions.insert(
                         id,
                         ProxySession {
@@ -233,15 +236,15 @@ impl Ui {
                         },
                     );
                 }
-                crate::events::SessionEvents::End(uuid) => {
+                models::events::SessionEvents::End(uuid) => {
                     self.state.sessions.remove(&uuid);
                 }
             },
             Events::Bandwidth(bandwidth_events) => match bandwidth_events {
-                crate::events::BandwidthEvents::Upload(session_id, u) => {
+                models::events::BandwidthEvents::Upload(session_id, u) => {
                     self.state.add_upload(u);
                 }
-                crate::events::BandwidthEvents::Download(session_id, d) => {
+                models::events::BandwidthEvents::Download(session_id, d) => {
                     self.state.add_download(d);
                 }
             },
@@ -320,4 +323,34 @@ impl Ui {
 
         frame.render_widget(tabs, area);
     }
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    // Establish TCP connection to server.
+    let socket = TcpStream::connect((Ipv4Addr::LOCALHOST, 9876))
+        .await
+        .unwrap();
+    let (socket_rx, socket_tx) = socket.into_split();
+
+    // Establish a Remoc connection with default configuration over the TCP connection and
+    // consume (i.e. receive) the counter client from the server.
+    let mut client: CounterClient = remoc::Connect::io(remoc::Cfg::default(), socket_rx, socket_tx)
+        .consume()
+        .await
+        .unwrap();
+
+    // Subscribe to the counter watch and print each value change.
+    println!("Subscribing to counter change notifications");
+    let mut watch_rx = client.watch().await.unwrap();
+    tokio::spawn(async move {
+        loop {
+            while let Ok(()) = watch_rx.changed().await {
+                let value = watch_rx.borrow_and_update().unwrap();
+                println!("Counter change notification: {}", *value);
+            }
+        }
+    });
+
+    Ok(())
 }

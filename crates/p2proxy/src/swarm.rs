@@ -205,7 +205,7 @@ impl ProxyNetwork<NetworkConnect> {
 
         let _ = event_send
             .send(Events::Connection(
-                crate::events::ConnectionEvents::Connecting,
+                models::events::ConnectionEvents::Connecting,
             ))
             .await;
         let bootstrap = multiaddr::multiaddr!(Dnsaddr("boot1.bitping.com"));
@@ -262,7 +262,7 @@ impl ProxyNetwork<NetworkConnect> {
         // Store relay peer ID in app state
         let _ = event_send
             .send(Events::Connection(
-                crate::events::ConnectionEvents::Connected(relay_peer_id),
+                models::events::ConnectionEvents::Connected(relay_peer_id),
             ))
             .await;
 

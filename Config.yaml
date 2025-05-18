@@ -3,7 +3,8 @@ port: 45445
 servers:
   - protocol: Socks5
     port: 1080
-    country: AU
+    # destination_peer: /p2p/12D3KooWRpLEMb8cUf89RyHavY6whozkkJgHTQvfQyy65WyUpguF
+    country: ID
 
   # - protocol: Socks5
   #   port: 1080

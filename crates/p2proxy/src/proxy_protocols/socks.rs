@@ -26,7 +26,7 @@ use tokio::{
 use tracing::{error, info};
 use uuid::Uuid;
 
-use crate::events::{BandwidthEvents, Events, SessionEvents};
+use models::events::{BandwidthEvents, Events, SessionEvents};
 
 struct TargetWrapper(TargetAddr);
 
