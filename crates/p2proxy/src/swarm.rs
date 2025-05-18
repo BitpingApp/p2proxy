@@ -3,8 +3,8 @@ use std::{sync::LazyLock, time::Duration};
 
 use crate::config::Server;
 use crate::proxy_protocols::socks_stream::{DataDirection, SocksStreamMessage};
+use crate::utils::wait_ext::SwarmWaitExt;
 use crate::CONFIG;
-use crate::{events::Events, utils::wait_ext::SwarmWaitExt};
 use crate::{proxy_protocols, GRPC_CHANNEL};
 use bitping_swarm::auth::Auth;
 use bitping_swarm::query::{QueryCodec, QueryProtocol, QueryRequest};
@@ -24,6 +24,7 @@ use libp2p::{
     tcp, yamux, PeerId, Swarm,
 };
 use libp2p_stream as stream;
+use models::events::Events;
 use protocols::auth::v1::{
     authentication_service_client::AuthenticationServiceClient, FederatedApiTokenAuthRequest,
 };

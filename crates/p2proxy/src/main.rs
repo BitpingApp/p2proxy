@@ -16,7 +16,6 @@ use tracing_error::ErrorLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 mod config;
-mod events;
 mod proxy_protocols;
 mod swarm;
 mod utils;
