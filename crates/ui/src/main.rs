@@ -1,4 +1,7 @@
-use color_eyre::eyre::Result;
+use color_eyre::{
+    eyre::{Context, ContextCompat, Result},
+    owo_colors::OwoColorize,
+};
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode},
     execute,
@@ -19,10 +22,12 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::{net::TcpStream, select, sync::mpsc::Receiver, time::interval};
-use tracing::{debug, info};
+use tracing::{debug, info, level_filters::LevelFilter};
+use tracing_error::ErrorLayer;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 use ui_state::{ConnectionStatus, ProxySession, UIState};
 
-use remoc::ConnectExt;
+use remoc::{rch::watch::ReceiverStream, ConnectExt};
 
 mod logs;
 // mod network;
@@ -327,30 +332,74 @@ impl Ui {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    use remoc::prelude::*;
+
+    std::panic::set_hook(Box::new(|panic_info| {
+        crossterm::execute!(std::io::stderr(), crossterm::terminal::LeaveAlternateScreen).unwrap();
+        crossterm::terminal::disable_raw_mode().unwrap();
+        better_panic::Settings::auto()
+            .most_recent_first(false)
+            .lineno_suffix(true)
+            .create_panic_handler()(panic_info);
+    }));
+
+    let env_filter = EnvFilter::builder()
+        .with_default_directive(LevelFilter::INFO.into())
+        .from_env_lossy();
+
+    let fmt = tracing_subscriber::fmt::Layer::default()
+        .compact()
+        .pretty()
+        .with_file(true);
+
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(fmt)
+        .with(ErrorLayer::default())
+        .init();
+
+    color_eyre::install()?;
+
     // Establish TCP connection to server.
-    let socket = TcpStream::connect((Ipv4Addr::LOCALHOST, 9876))
-        .await
-        .unwrap();
+    let socket = TcpStream::connect((Ipv4Addr::LOCALHOST, 9876)).await?;
     let (socket_rx, socket_tx) = socket.into_split();
 
     // Establish a Remoc connection with default configuration over the TCP connection and
     // consume (i.e. receive) the counter client from the server.
     let mut client: CounterClient = remoc::Connect::io(remoc::Cfg::default(), socket_rx, socket_tx)
         .consume()
+        .await?;
+
+    // loop {
+    //     let hm = client.value().await.context("Failed to get HashMap")?;
+
+    //     info!("HashMap: {hm:?}");
+    //     tokio::time::sleep(Duration::from_secs(1)).await;
+    // }
+
+    // let rx = client.watch().await.context("Failed to get watcher")?;
+
+    // let mut rx_stream = ReceiverStream::new(rx);
+
+    // loop {
+    //     let thing = rx_stream
+    //         .next()
+    //         .await
+    //         .context("No msg")?
+    //         .context("Failed to get stream?")?;
+    //     info!(?thing, "Got thing");
+    // }
+
+    // // Subscribe to the counter watch and print each value change.
+    // println!("Subscribing to counter change notifications");
+    let mut watch_rx = client
+        .subscribe()
         .await
-        .unwrap();
-
-    // Subscribe to the counter watch and print each value change.
-    println!("Subscribing to counter change notifications");
-    let mut watch_rx = client.watch().await.unwrap();
-    tokio::spawn(async move {
-        loop {
-            while let Ok(()) = watch_rx.changed().await {
-                let value = watch_rx.borrow_and_update().unwrap();
-                println!("Counter change notification: {}", *value);
-            }
+        .context("Failed to get subscription")?;
+    watch_rx.take_initial();
+    loop {
+        if let Ok(Some(x)) = watch_rx.recv().await {
+            info!(?x, "Counter change notification");
         }
-    });
-
-    Ok(())
+    }
 }

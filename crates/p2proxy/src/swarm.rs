@@ -1,7 +1,7 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::{sync::LazyLock, time::Duration};
 
-use crate::config::Server;
 use crate::proxy_protocols::socks_stream::{DataDirection, SocksStreamMessage};
 use crate::utils::wait_ext::SwarmWaitExt;
 use crate::CONFIG;
@@ -9,7 +9,7 @@ use crate::{proxy_protocols, GRPC_CHANNEL};
 use bitping_swarm::auth::Auth;
 use bitping_swarm::query::{QueryCodec, QueryProtocol, QueryRequest};
 use bitping_tcp_proxy::bandwidth_reporter::{BandwidthReporterCodec, BandwidthReporterProtocol};
-use color_eyre::eyre::{bail, ensure, eyre, Context, Result};
+use color_eyre::eyre::{bail, eyre, Context, Result};
 use color_eyre::owo_colors::OwoColorize;
 use futures::StreamExt;
 use libp2p::request_response::Message;
@@ -25,14 +25,16 @@ use libp2p::{
 };
 use libp2p_stream as stream;
 use metrics::{counter, gauge};
+use models::config::Server;
 use models::events::Events;
+use models::{Counter, ServerContainer, ServerState};
 use protocols::auth::v1::{
     authentication_service_client::AuthenticationServiceClient, FederatedApiTokenAuthRequest,
 };
 use protocols::models::v1::Requirements;
 use sha2::Digest;
 use tokio::sync::mpsc::{self, Sender};
-use tokio::time::Timeout;
+use tokio::sync::RwLock;
 use tonic::codec::CompressionEncoding;
 use tracing::{debug, info, instrument, warn};
 
@@ -500,12 +502,12 @@ impl ProxyNetwork<Bootstrapped> {
         Ok(destination_address)
     }
 
-    pub async fn drive_network(mut self) -> Result<()> {
+    pub async fn drive_network(mut self, server_state: Arc<RwLock<ServerContainer>>) -> Result<()> {
         // Main event loop
         loop {
             tokio::select! {
                 Some(message) = self.0.proxy_message_channel.1.recv() => {
-                    if let Err(e) = self.handle_proxy_events(message).await {
+                    if let Err(e) = self.handle_proxy_events(message, server_state.clone()).await {
                         warn!(?e, "Something went wrong handling proxy events");
                     }
                 },
@@ -516,13 +518,21 @@ impl ProxyNetwork<Bootstrapped> {
         }
     }
 
-    async fn handle_proxy_events(&mut self, message: SocksStreamMessage) -> Result<()> {
+    async fn handle_proxy_events(
+        &mut self,
+        message: SocksStreamMessage,
+        server_state: Arc<RwLock<ServerContainer>>,
+    ) -> Result<()> {
         match message {
             SocksStreamMessage::Initialized {
                 session_id,
                 target_addr,
                 peer,
             } => {
+                let mut state = server_state.write().await;
+
+                state.add_state();
+
                 counter!("p2proxy_sessions_initialized_total").increment(1);
                 debug!(
                     "New session: {} to {:?} via {}",
@@ -542,7 +552,7 @@ impl ProxyNetwork<Bootstrapped> {
                         counter!("p2proxy_upload_bytes_total").increment(bytes as u64);
                     }
                 };
-                
+
                 let dir_str = match direction {
                     DataDirection::Incoming => "incoming",
                     DataDirection::Outgoing => "outgoing",
@@ -603,7 +613,7 @@ impl ProxyNetwork<Bootstrapped> {
                         let _ = e.wrap_err("Failed to discover peer after connection dropped")?;
                     }
                 }
-            },
+            }
         }
 
         Ok(())
@@ -624,7 +634,7 @@ fn handle_swarm_events(event: SwarmEvent<BehaviourEvent>) {
         SwarmEvent::ConnectionClosed { peer_id, .. } => {
             // Update connected peers metric
             gauge!("p2proxy_peers_connected").decrement(1.0);
-            
+
             info!("Connection closed with peer: {}", peer_id);
         }
         SwarmEvent::NewListenAddr { address, .. } => {

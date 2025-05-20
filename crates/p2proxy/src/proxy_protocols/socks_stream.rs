@@ -28,7 +28,7 @@ use tokio::{
 use tracing::{debug, error, info, instrument, warn};
 use uuid::Uuid;
 
-use crate::config::Server;
+use models::config::Server;
 
 // Optimized buffer size
 const SOCKET_BUF_SIZE: usize = 8196;

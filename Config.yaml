@@ -4,7 +4,7 @@ servers:
   - protocol: Socks5
     port: 1080
     # destination_peer: /p2p/12D3KooWRpLEMb8cUf89RyHavY6whozkkJgHTQvfQyy65WyUpguF
-    country: ID
+    # country: ID
 
   # - protocol: Socks5
   #   port: 1080

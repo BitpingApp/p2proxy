@@ -4,10 +4,10 @@ use std::{
 };
 
 use color_eyre::eyre::{Context, Result};
-use config::Config;
 use metrics_exporter_prometheus::PrometheusBuilder;
-use models::{CounterClient, CounterObj, CounterServerSharedMut};
-use remoc::{codec::Codec, rtc::ServerSharedMut};
+use models::config::Config;
+use models::{CounterClient, CounterServerSharedMut, ServerContainer};
+use remoc::{codec::Codec, rch, robs::hash_map::ObservableHashMap, rtc::ServerSharedMut};
 use swarm::ProxyNetwork;
 use tokio::{net::TcpListener, sync::RwLock, task::JoinSet};
 use tonic::transport::{Channel, ClientTlsConfig};
@@ -15,7 +15,6 @@ use tracing::level_filters::LevelFilter;
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-mod config;
 mod proxy_protocols;
 mod swarm;
 mod utils;
@@ -93,8 +92,9 @@ async fn main() -> Result<()> {
         proxy_future.configure_server(server).await?;
     }
 
-    let _ = join_set.spawn(async move { proxy_future.drive_network().await });
-    let _ = join_set.spawn(start_server());
+    let server_state = Arc::new(RwLock::new(ServerContainer::new(CONFIG.servers.clone())));
+    let _ = join_set.spawn(proxy_future.drive_network(server_state.clone()));
+    let _ = join_set.spawn(start_server(server_state));
 
     while let Some(result) = join_set.join_next().await {
         result??;
@@ -106,11 +106,10 @@ async fn main() -> Result<()> {
 }
 
 const TCP_PORT: u16 = 9876;
-async fn start_server() -> Result<()> {
+async fn start_server(server_state: Arc<RwLock<ServerContainer>>) -> Result<()> {
     use remoc::ConnectExt;
     // Create a counter object that will be shared between all clients.
     // You could also create one counter object per connection.
-    let counter_obj = Arc::new(RwLock::new(CounterObj::default()));
 
     // Listen to TCP connections using Tokio.
     // In reality you would probably use TLS or WebSockets over HTTPS.
@@ -122,9 +121,7 @@ async fn start_server() -> Result<()> {
         let (socket, addr) = listener.accept().await.unwrap();
         let (socket_rx, socket_tx) = socket.into_split();
         println!("Accepted connection from {}", addr);
-
-        // Create a new shared reference to the counter object.
-        let counter_obj = counter_obj.clone();
+        let counter_obj = server_state.clone();
 
         // Spawn a task for each incoming connection.
         tokio::spawn(async move {
