@@ -31,7 +31,7 @@ use models::{Counter, ServerContainer, ServerState};
 use protocols::auth::v1::{
     authentication_service_client::AuthenticationServiceClient, FederatedApiTokenAuthRequest,
 };
-use protocols::models::v1::Requirements;
+use protocols::models::v1::{Bandwidth, Exclusions, Requirements};
 use sha2::Digest;
 use tokio::sync::mpsc::{self, Sender};
 use tokio::sync::RwLock;
@@ -426,6 +426,14 @@ impl ProxyNetwork<Bootstrapped> {
             }
         } else {
             let mut node_reqs = Requirements::default();
+            let node_excs = Exclusions {
+                bandwidth: Some(Bandwidth {
+                    less_than: Some(server.peer_options.min_bandwidth.as_bps() as f64),
+                    greater_than: None,
+                }),
+                ..Default::default()
+            };
+
             if let Some(c) = &server.peer_options.country {
                 node_reqs.countries = vec![c.clone()];
             }
@@ -433,7 +441,7 @@ impl ProxyNetwork<Bootstrapped> {
             let request = Auth::new(
                 QueryRequest::FindNodes {
                     requirements: Some(node_reqs),
-                    exclusions: None,
+                    exclusions: Some(node_excs),
                     capabilities: None,
                     limit: 25,
                 },
@@ -529,10 +537,6 @@ impl ProxyNetwork<Bootstrapped> {
                 target_addr,
                 peer,
             } => {
-                let mut state = server_state.write().await;
-
-                state.add_state();
-
                 counter!("p2proxy_sessions_initialized_total").increment(1);
                 debug!(
                     "New session: {} to {:?} via {}",

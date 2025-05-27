@@ -36,8 +36,6 @@ pub type StateMap = ObservableHashMap<config::Server, ServerState>;
 #[rtc::remote]
 pub trait Counter {
     async fn value(&self) -> Result<u64, CallError>;
-
-    async fn add_state(&mut self) -> Result<(), CallError>;
     async fn watch(&mut self) -> Result<rch::watch::Receiver<u32>, CallError>;
     async fn subscribe(
         &self,
@@ -97,34 +95,6 @@ impl Counter for ServerContainer {
     async fn value(&self) -> Result<u64, CallError> {
         info!("Getting value");
         Ok(42)
-    }
-
-    async fn add_state(&mut self) -> Result<(), CallError> {
-        self.value.insert(
-            config::Server {
-                protocol: config::ProxyProtocols::Socks5,
-                port: 1000,
-                peer_options: ServerPeerOptions {
-                    destination_peer: None,
-                    country: None,
-                },
-            },
-            ServerState {
-                // last_bw: BandwidthSlice {
-                //     value: 500,
-                //     at: Local::now(),
-                // },
-                // status: ConnectionStatus::Connected,
-                client_connections: 0,
-                peer_connections: 0,
-            },
-        );
-
-        for observer in &self.observers {
-            let _ = observer.send(self.observers.len() as u32);
-        }
-
-        Ok(())
     }
 
     async fn watch(&mut self) -> Result<rch::watch::Receiver<u32>, CallError> {

@@ -9,6 +9,7 @@ use figment::{
     providers::{Env, Format, Yaml},
     Figment,
 };
+use human_bandwidth::re::bandwidth::Bandwidth;
 use libp2p::{Multiaddr, PeerId};
 use serde::{Deserialize, Serialize};
 
@@ -38,6 +39,13 @@ pub struct ServerPeerOptions {
     // TODO: Eventually replace this with some more options.
     pub destination_peer: Option<Multiaddr>,
     pub country: Option<String>,
+    #[serde(default = "default_min_bandwith")]
+    #[serde(with = "human_bandwidth::serde")]
+    pub min_bandwidth: Bandwidth,
+}
+
+fn default_min_bandwith() -> Bandwidth {
+    Bandwidth::from_mbps(50)
 }
 
 impl Display for ServerPeerOptions {

@@ -3,9 +3,6 @@ port: 45445
 servers:
   - protocol: Socks5
     port: 1080
-    # destination_peer: /p2p/12D3KooWRpLEMb8cUf89RyHavY6whozkkJgHTQvfQyy65WyUpguF
-    # country: ID
-
-  # - protocol: Socks5
-  #   port: 1080
-  #   destination_peer: /p2p/12D3KooWCAJ2AdKMotrrRMG3s2hxAeecwPm7prLPWcLnwbfBZ4GC    
+    # country: NZ
+    min_bandwidth: 70Mbps
+    # destination_peer: /ip6/YOUR_IPV6_ADDR/udp/SOEMTHING/quic-v1/p2p/12D3KooWSAoUzgpG8fSgaHP6n4Nfqimj7RPX86ayrkTQeoTJtrsB    
