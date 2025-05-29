@@ -520,7 +520,7 @@ impl ProxyNetwork<Bootstrapped> {
                     }
                 },
                 Some(event) = self.0.swarm.next() => {
-                    handle_swarm_events(event);
+                    handle_swarm_events(event, server_state.clone());
                 }
             };
         }
@@ -542,6 +542,14 @@ impl ProxyNetwork<Bootstrapped> {
                     "New session: {} to {:?} via {}",
                     session_id, target_addr, peer
                 );
+                
+                // Send session event to ServerContainer
+                let event = Events::Session(models::events::SessionEvents::New(
+                    session_id,
+                    target_addr,
+                    peer,
+                ));
+                server_state.write().await.handle_event(event).await;
             }
             SocksStreamMessage::DataTransferred {
                 session_id,
@@ -551,9 +559,23 @@ impl ProxyNetwork<Bootstrapped> {
                 match direction {
                     DataDirection::Incoming => {
                         counter!("p2proxy_download_bytes_total").increment(bytes as u64);
+                        
+                        // Send bandwidth event to ServerContainer
+                        let event = Events::Bandwidth(models::events::BandwidthEvents::Download(
+                            session_id,
+                            bytes as u64,
+                        ));
+                        server_state.write().await.handle_event(event).await;
                     }
                     DataDirection::Outgoing => {
                         counter!("p2proxy_upload_bytes_total").increment(bytes as u64);
+                        
+                        // Send bandwidth event to ServerContainer
+                        let event = Events::Bandwidth(models::events::BandwidthEvents::Upload(
+                            session_id,
+                            bytes as u64,
+                        ));
+                        server_state.write().await.handle_event(event).await;
                     }
                 };
 
@@ -588,6 +610,10 @@ impl ProxyNetwork<Bootstrapped> {
                     ?report,
                     "Session finished.",
                 );
+                
+                // Send session end event to ServerContainer
+                let event = Events::Session(models::events::SessionEvents::End(session_id));
+                server_state.write().await.handle_event(event).await;
 
                 let token = self.0.token.clone();
                 if let Ok(authed_report) = Auth::new(report, &KEYPAIR, token) {
@@ -624,7 +650,7 @@ impl ProxyNetwork<Bootstrapped> {
     }
 }
 
-fn handle_swarm_events(event: SwarmEvent<BehaviourEvent>) {
+fn handle_swarm_events(event: SwarmEvent<BehaviourEvent>, server_state: Arc<RwLock<ServerContainer>>) {
     match event {
         SwarmEvent::ConnectionEstablished {
             peer_id, endpoint, ..
@@ -634,12 +660,24 @@ fn handle_swarm_events(event: SwarmEvent<BehaviourEvent>) {
             gauge!("p2proxy_peers_connected").increment(1.0);
 
             info!("Connection established with peer: {}", peer_id);
+            
+            // Send connection event to ServerContainer
+            let event = Events::Connection(models::events::ConnectionEvents::Connected(peer_id));
+            tokio::spawn(async move {
+                server_state.write().await.handle_event(event).await;
+            });
         }
         SwarmEvent::ConnectionClosed { peer_id, .. } => {
             // Update connected peers metric
             gauge!("p2proxy_peers_connected").decrement(1.0);
 
             info!("Connection closed with peer: {}", peer_id);
+            
+            // Send disconnection event to ServerContainer
+            let event = Events::Connection(models::events::ConnectionEvents::Disconnected);
+            tokio::spawn(async move {
+                server_state.write().await.handle_event(event).await;
+            });
         }
         SwarmEvent::NewListenAddr { address, .. } => {
             counter!("p2proxy_listen_addresses_total").increment(1);

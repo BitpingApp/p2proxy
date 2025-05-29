@@ -255,7 +255,7 @@ impl Ui {
             },
         };
 
-        // self.mark_dirty();
+        self.mark_dirty();
     }
 
     pub fn previous_tab(&mut self) {
@@ -390,16 +390,74 @@ async fn main() -> Result<()> {
     //     info!(?thing, "Got thing");
     // }
 
-    // // Subscribe to the counter watch and print each value change.
-    // println!("Subscribing to counter change notifications");
+    // Subscribe to the server state changes and create a channel for UI updates
     let mut watch_rx = client
         .subscribe()
         .await
         .context("Failed to get subscription")?;
-    watch_rx.take_initial();
-    loop {
-        if let Ok(Some(x)) = watch_rx.recv().await {
-            info!(?x, "Counter change notification");
+    
+    let (ui_tx, ui_rx) = tokio::sync::mpsc::channel(100);
+    
+    // Spawn a task to handle remoc subscription updates
+    tokio::spawn(async move {
+        // Take the initial state
+        if let Some(initial_state) = watch_rx.take_initial() {
+            for (server, state) in initial_state {
+                info!(?server, ?state, "Initial server state");
+                // Convert server state to UI events
+                if let Some(peer_id) = state.local_peer_id {
+                    let _ = ui_tx.send(Events::LocalPeerId(peer_id)).await;
+                }
+                
+                let connection_event = match state.connection_status {
+                    models::ConnectionStatus::Connected => {
+                        Events::Connection(models::events::ConnectionEvents::Connected(
+                            state.local_peer_id.unwrap_or_default()
+                        ))
+                    }
+                    models::ConnectionStatus::Disconnected => {
+                        Events::Connection(models::events::ConnectionEvents::Disconnected)
+                    }
+                };
+                let _ = ui_tx.send(connection_event).await;
+            }
         }
-    }
+        
+        // Handle ongoing updates
+        loop {
+            if let Ok(Some(update)) = watch_rx.recv().await {
+                match update {
+                    remoc::robs::hash_map::Update::Insert(server, state) |
+                    remoc::robs::hash_map::Update::Update(server, state) => {
+                        info!(?server, ?state, "Server state update");
+                        
+                        // Convert server state to UI events
+                        if let Some(peer_id) = state.local_peer_id {
+                            let _ = ui_tx.send(Events::LocalPeerId(peer_id)).await;
+                        }
+                        
+                        let connection_event = match state.connection_status {
+                            models::ConnectionStatus::Connected => {
+                                Events::Connection(models::events::ConnectionEvents::Connected(
+                                    state.local_peer_id.unwrap_or_default()
+                                ))
+                            }
+                            models::ConnectionStatus::Disconnected => {
+                                Events::Connection(models::events::ConnectionEvents::Disconnected)
+                            }
+                        };
+                        let _ = ui_tx.send(connection_event).await;
+                    }
+                    remoc::robs::hash_map::Update::Remove(server) => {
+                        info!(?server, "Server removed");
+                    }
+                }
+            }
+        }
+    });
+    
+    // Run the UI with the subscription updates
+    Ui::run_ui(ui_rx).await?;
+    
+    Ok(())
 }

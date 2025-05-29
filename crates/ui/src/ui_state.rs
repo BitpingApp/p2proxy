@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet},
     time::Instant,
 };
 
@@ -31,8 +31,75 @@ pub struct ProxySession {
     pub id: SessionId,
     pub peer_id: PeerId,
     pub endpoint: TargetAddr,
-    // pub bandwidth_upload: [(Instant, u64); 50],
-    // pub bandwidth_download: [(Instant, u64); 50],
+}
+
+#[derive(Debug, Clone)]
+pub struct ServerInfo {
+    pub protocol: String,
+    pub port: u16,
+    pub active_sessions: usize,
+    pub upload_rate: f64,   // KB/s
+    pub download_rate: f64, // KB/s
+}
+
+#[derive(Debug, Default)]
+pub struct PrometheusMetrics {
+    pub total_sessions: usize,
+    pub total_peers: usize,
+    pub total_upload_bytes: u64,
+    pub total_download_bytes: u64,
+    pub upload_rate: f64,   // KB/s
+    pub download_rate: f64, // KB/s
+    pub servers: Vec<ServerInfo>,
+}
+
+impl PrometheusMetrics {
+    pub fn parse_from_text(text: &str) -> Self {
+        let mut metrics = PrometheusMetrics::default();
+        
+        for line in text.lines() {
+            if line.starts_with('#') || line.trim().is_empty() {
+                continue;
+            }
+            
+            if let Some((metric_name, value_str)) = line.split_once(' ') {
+                if let Ok(value) = value_str.parse::<f64>() {
+                    match metric_name {
+                        "p2proxy_sessions_initialized_total" => {
+                            metrics.total_sessions = value as usize;
+                        }
+                        "p2proxy_peers_connected" => {
+                            metrics.total_peers = value as usize;
+                        }
+                        "p2proxy_upload_bytes_total" => {
+                            metrics.total_upload_bytes = value as u64;
+                        }
+                        "p2proxy_download_bytes_total" => {
+                            metrics.total_download_bytes = value as u64;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        
+        // Calculate rates (simplified - in real implementation you'd track over time)
+        metrics.upload_rate = (metrics.total_upload_bytes as f64) / 1024.0 / 60.0; // Rough KB/s
+        metrics.download_rate = (metrics.total_download_bytes as f64) / 1024.0 / 60.0; // Rough KB/s
+        
+        // Mock server data for now - in real implementation, parse from metrics
+        metrics.servers = vec![
+            ServerInfo {
+                protocol: "SOCKS5".to_string(),
+                port: 1080,
+                active_sessions: metrics.total_sessions,
+                upload_rate: metrics.upload_rate,
+                download_rate: metrics.download_rate,
+            }
+        ];
+        
+        metrics
+    }
 }
 
 pub struct UIState {
@@ -40,19 +107,18 @@ pub struct UIState {
     pub connection_status: ConnectionStatus,
     pub peers: HashSet<PeerId>,
     pub sessions: HashMap<SessionId, ProxySession>,
+    pub servers: Vec<ServerInfo>,
 
     pub total_upload: u64,
     pub total_download: u64,
+    pub upload_rate: f64,   // Current KB/s
+    pub download_rate: f64, // Current KB/s
 
     // Store data as (x, y) points where:
     // x is the time in seconds
     // y is the bandwidth in KB/s
     pub upload_graph: Vec<(DateTime<Utc>, f64)>,
     pub download_graph: Vec<(DateTime<Utc>, f64)>,
-    pub bandwidth_history_max_size: usize,
-
-    // Track the start time for our graph
-    pub graph_start_time: Instant,
 }
 
 impl UIState {
@@ -62,95 +128,47 @@ impl UIState {
             connection_status: ConnectionStatus::default(),
             peers: HashSet::new(),
             sessions: HashMap::new(),
+            servers: Vec::new(),
             total_upload: 0,
             total_download: 0,
+            upload_rate: 0.0,
+            download_rate: 0.0,
             upload_graph: Vec::with_capacity(1000),
             download_graph: Vec::with_capacity(1000),
-            bandwidth_history_max_size: 1000,
-            graph_start_time: Instant::now(),
         }
     }
 
-    pub fn add_upload(&mut self, upload: u64) {
-        self.total_upload += upload;
-
-        // Calculate time position
-        let time_of_upload = chrono::Utc::now();
-
-        // Convert upload to Mbps
-        let upload_mbps = upload as f64 / 1000.0;
-
-        // Add the point
-        self.upload_graph.push((time_of_upload, upload_mbps));
-
-        // Limit the number of points
-        if self.upload_graph.len() > self.bandwidth_history_max_size {
-            self.upload_graph.remove(0);
+    pub fn update_from_metrics(&mut self, metrics: PrometheusMetrics) {
+        // Update totals
+        self.total_upload = metrics.total_upload_bytes;
+        self.total_download = metrics.total_download_bytes;
+        self.upload_rate = metrics.upload_rate;
+        self.download_rate = metrics.download_rate;
+        
+        // Update servers
+        self.servers = metrics.servers;
+        
+        // Update connection status based on peer count
+        if metrics.total_peers > 0 {
+            // For now, use a dummy peer ID - in real implementation, get from metrics
+            self.connection_status = ConnectionStatus::Connected(libp2p::PeerId::random());
+        } else {
+            self.connection_status = ConnectionStatus::Disconnected;
         }
-    }
-
-    pub fn add_download(&mut self, download: u64) {
-        self.total_download += download;
-
-        // Calculate time position
-        let time_of_download = chrono::Utc::now();
-
-        let download_mbps = download as f64 / 1000.0;
-
-        // Add the point
-        self.download_graph.push((time_of_download, download_mbps));
-
-        // Limit the number of points
-        if self.download_graph.len() > self.bandwidth_history_max_size {
-            self.download_graph.remove(0);
+        
+        // Add bandwidth data points
+        let now = chrono::Utc::now();
+        
+        if self.upload_rate > 0.0 {
+            self.upload_graph.push((now, self.upload_rate));
         }
-    }
-
-    pub fn get_upload_stats(&self) -> Option<(DateTime<Utc>, DateTime<Utc>, f64, f64)> {
-        if self.upload_graph.is_empty() {
-            return None;
+        if self.download_rate > 0.0 {
+            self.download_graph.push((now, self.download_rate));
         }
-
-        let mut min_timestamp = self.upload_graph[0].0;
-        let mut max_timestamp = self.upload_graph[0].0;
-        let mut min_upload = f64::MAX;
-        let mut max_upload = f64::MIN;
-
-        for &(timestamp, upload) in &self.upload_graph {
-            if timestamp < min_timestamp {
-                min_timestamp = timestamp;
-            }
-            if timestamp > max_timestamp {
-                max_timestamp = timestamp;
-            }
-            min_upload = min_upload.min(upload);
-            max_upload = max_upload.max(upload);
-        }
-
-        Some((min_timestamp, max_timestamp, min_upload, max_upload))
-    }
-
-    pub fn get_download_stats(&self) -> Option<(DateTime<Utc>, DateTime<Utc>, f64, f64)> {
-        if self.download_graph.is_empty() {
-            return None;
-        }
-
-        let mut min_timestamp = self.download_graph[0].0;
-        let mut max_timestamp = self.download_graph[0].0;
-        let mut min_download = f64::MAX;
-        let mut max_download = f64::MIN;
-
-        for &(timestamp, download) in &self.download_graph {
-            if timestamp < min_timestamp {
-                min_timestamp = timestamp;
-            }
-            if timestamp > max_timestamp {
-                max_timestamp = timestamp;
-            }
-            min_download = min_download.min(download);
-            max_download = max_download.max(download);
-        }
-
-        Some((min_timestamp, max_timestamp, min_download, max_download))
+        
+        // Keep only last 30 seconds of data
+        let cutoff_time = now - chrono::Duration::seconds(30);
+        self.upload_graph.retain(|(time, _)| *time >= cutoff_time);
+        self.download_graph.retain(|(time, _)| *time >= cutoff_time);
     }
 }

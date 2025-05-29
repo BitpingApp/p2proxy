@@ -36,3 +36,8 @@ libp2p = { version = "0.55", features = [
   "serde",
 ] }
 uuid = { version = "1.12.1", features = ["v4", "fast-rng"] }
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

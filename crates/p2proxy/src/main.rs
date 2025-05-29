@@ -6,8 +6,8 @@ use std::{
 use color_eyre::eyre::{Context, Result};
 use metrics_exporter_prometheus::PrometheusBuilder;
 use models::config::Config;
-use models::{CounterClient, CounterServerSharedMut, ServerContainer};
-use remoc::{codec::Codec, rch, robs::hash_map::ObservableHashMap, rtc::ServerSharedMut};
+use models::{CounterClient, CounterServerSharedMut, ServerContainer, events::Events};
+use remoc::{codec::Codec, rch, rtc::ServerSharedMut};
 use swarm::ProxyNetwork;
 use tokio::{net::TcpListener, sync::RwLock, task::JoinSet};
 use tonic::transport::{Channel, ClientTlsConfig};
@@ -94,7 +94,8 @@ async fn main() -> Result<()> {
 
     let server_state = Arc::new(RwLock::new(ServerContainer::new(CONFIG.servers.clone())));
     let _ = join_set.spawn(proxy_future.drive_network(server_state.clone()));
-    let _ = join_set.spawn(start_server(server_state));
+    let _ = join_set.spawn(start_server(server_state.clone()));
+    let _ = join_set.spawn(handle_swarm_events(rx, server_state.clone()));
 
     while let Some(result) = join_set.join_next().await {
         result??;
@@ -102,6 +103,17 @@ async fn main() -> Result<()> {
 
     // Wait for both to complete
 
+    Ok(())
+}
+
+async fn handle_swarm_events(
+    mut rx: tokio::sync::mpsc::Receiver<Events>,
+    server_state: Arc<RwLock<ServerContainer>>,
+) -> Result<()> {
+    while let Some(event) = rx.recv().await {
+        let mut state = server_state.write().await;
+        state.handle_event(event).await;
+    }
     Ok(())
 }
 

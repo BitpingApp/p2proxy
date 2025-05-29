@@ -2,6 +2,7 @@
 name = "models"
 version = "0.1.0"
 edition = "2024"
+repository = "https://github.com/BitpingApp/p2proxy"
 
 [dependencies]
 remoc = { workspace = true }

@@ -2,8 +2,13 @@
 name = "p2proxy"
 version = "1.0.0"
 edition = "2021"
-publish = false
 license = "MIT"
+repository = "https://github.com/BitpingApp/p2proxy"
+description = "A peer-to-peer proxy system built with Rust that enables secure and decentralized network communication through libp2p"
+homepage = "https://github.com/BitpingApp/p2proxy"
+
+[package.metadata.dist]
+dist = true
 
 [dependencies]
 async-trait = { workspace = true }

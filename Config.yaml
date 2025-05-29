@@ -1,5 +1,8 @@
 port: 45445
 
+# Logging configuration
+log_level: info
+
 servers:
   - protocol: Socks5
     port: 1080

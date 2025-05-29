@@ -1,119 +1,179 @@
-use std::time::Instant;
-
-use crate::state::AppState;
-
-use super::{Ui, EVA_BLUE, EVA_FOREGROUND, EVA_ORANGE, EVA_TEAL, EVA_YELLOW};
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Cell, Row, Table, Paragraph, Gauge},
+};
+
+use super::{
+    ui_state::{UIState, ConnectionStatus},
+    Ui, ACCENT, BACKGROUND, BORDER, FOREGROUND, PRIMARY, SECONDARY, SUCCESS, WARN, ERROR,
 };
 
 impl Ui {
-    pub(crate) fn render_network_tab(&self, frame: &mut Frame<'_>, area: Rect, state: &AppState) {
-        // Apply animation - slide in from right
+    pub(crate) fn render_network_tab(&mut self, frame: &mut Frame<'_>, area: Rect) {
+        // Apply animation to the layout
         let animation_progress = self.ease_out_expo(self.animation_progress());
-        let animated_width = ((area.width as f32) * animation_progress) as u16;
+        if animation_progress >= 1.0 {
+            self.needs_render = false;
+        }
+
+        let animated_height = ((area.height as f32) * animation_progress) as u16;
         let animated_area = Rect::new(
-            area.x
-                .saturating_add(area.width.saturating_sub(animated_width)),
-            area.y,
-            animated_width,
-            area.height,
+            area.x,
+            area.y.saturating_add(area.height.saturating_sub(animated_height)),
+            area.width,
+            animated_height,
         );
 
-        let peers: Vec<(&libp2p::PeerId, &crate::state::PeerInfo)> = state.peers.iter().collect();
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(8),  // Network status
+                Constraint::Min(0),     // Peer list
+            ])
+            .split(animated_area);
 
-        if peers.is_empty() {
-            let text = vec![
-                Line::from(vec![Span::styled(
-                    "No peers connected",
-                    Style::default().fg(EVA_FOREGROUND),
-                )]),
-                Line::from(vec![Span::styled(
-                    "Waiting for connections...",
-                    Style::default().fg(EVA_FOREGROUND),
-                )]),
-            ];
+        // Network status section
+        self.render_network_status(frame, chunks[0]);
+        
+        // Peer connections table
+        self.render_peer_connections(frame, chunks[1]);
+    }
 
-            let paragraph = Paragraph::new(text)
-                .block(
-                    Block::default()
-                        .borders(ratatui::widgets::Borders::ALL)
-                        .border_style(Style::default().fg(EVA_ORANGE))
-                        .title(" NETWORK PEERS ")
-                        .title_alignment(Alignment::Center),
-                )
-                .alignment(Alignment::Center);
+    fn render_network_status(&self, frame: &mut Frame<'_>, area: Rect) {
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(area);
 
-            frame.render_widget(paragraph, animated_area);
-            return;
-        }
+        // Left side - Connection info
+        self.render_connection_info(frame, chunks[0]);
+        
+        // Right side - Network stats
+        self.render_network_stats(frame, chunks[1]);
+    }
 
-        // Create a list of peers with their details
-        let mut peer_text = Vec::new();
-
-        for (i, (peer_id, info)) in peers.iter().enumerate() {
-            let connected_duration = Instant::now().duration_since(info.connected_at);
-            let hours = connected_duration.as_secs() / 3600;
-            let minutes = (connected_duration.as_secs() % 3600) / 60;
-            let seconds = connected_duration.as_secs() % 60;
-
-            peer_text.push(Line::from(vec![
-                Span::styled(
-                    format!("PEER #{}: ", i + 1),
-                    Style::default().fg(EVA_YELLOW).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(peer_id.to_string(), Style::default().fg(EVA_FOREGROUND)),
-            ]));
-
-            peer_text.push(Line::from(vec![
-                Span::styled("  ADDRESS: ", Style::default().fg(EVA_TEAL)),
-                Span::styled(
-                    info.address.to_string(),
-                    Style::default().fg(EVA_FOREGROUND),
-                ),
-            ]));
-
-            peer_text.push(Line::from(vec![
-                Span::styled("  CONNECTED: ", Style::default().fg(EVA_TEAL)),
-                Span::styled(
-                    format!("{:02}:{:02}:{:02}", hours, minutes, seconds),
-                    Style::default().fg(EVA_FOREGROUND),
-                ),
-            ]));
-
-            peer_text.push(Line::from(vec![
-                Span::styled("  ROLE: ", Style::default().fg(EVA_TEAL)),
-                Span::styled(
-                    if info.is_relay { "RELAY" } else { "PEER" },
-                    Style::default()
-                        .fg(if info.is_relay { EVA_ORANGE } else { EVA_BLUE })
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ]));
-
-            // Add a separator between peers
-            if i < peers.len() - 1 {
-                peer_text.push(Line::from(""));
-                peer_text.push(Line::from(vec![Span::styled(
-                    "----------------------------------------",
-                    Style::default().fg(Color::DarkGray),
-                )]));
-                peer_text.push(Line::from(""));
+    fn render_connection_info(&self, frame: &mut Frame<'_>, area: Rect) {
+        let (status_text, status_color) = match &self.state.connection_status {
+            ConnectionStatus::Connected(peer_id) => {
+                (format!("Connected to: {:.12}...", peer_id.to_string()), SUCCESS)
             }
-        }
+            ConnectionStatus::Connecting => ("Connecting to network...".to_string(), WARN),
+            ConnectionStatus::Disconnected => ("Disconnected".to_string(), ERROR),
+        };
 
-        let paragraph = Paragraph::new(peer_text)
+        let local_peer_text = if let Some(peer_id) = &self.state.local_peer_id {
+            format!("Local Peer: {:.12}...", peer_id.to_string())
+        } else {
+            "Local Peer: Not assigned".to_string()
+        };
+
+        let text = vec![
+            Line::from(vec![
+                Span::styled("❯ ", Style::default().fg(BORDER)),
+                Span::styled("NETWORK STATUS", Style::default().fg(PRIMARY).add_modifier(Modifier::BOLD)),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("❯ ", Style::default().fg(ACCENT)),
+                Span::styled(status_text, Style::default().fg(status_color)),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("❯ ", Style::default().fg(SECONDARY)),
+                Span::styled(local_peer_text, Style::default().fg(FOREGROUND)),
+            ]),
+        ];
+
+        let paragraph = Paragraph::new(text)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(EVA_ORANGE))
-                    .title(" NETWORK PEERS ")
+                    .border_style(Style::default().fg(BORDER))
+                    .title(" CONNECTION INFO ")
                     .title_alignment(Alignment::Center),
             )
-            .scroll((0, 0))
-            .wrap(Wrap { trim: true });
+            .style(Style::default().bg(BACKGROUND));
 
-        frame.render_widget(paragraph, animated_area);
+        frame.render_widget(paragraph, area);
+    }
+
+    fn render_network_stats(&self, frame: &mut Frame<'_>, area: Rect) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Length(3),
+            ])
+            .margin(1)
+            .split(area);
+
+        let animation_progress = self.ease_out_expo(self.animation_progress());
+        
+        // Connected peers gauge
+        let peer_count = self.state.peers.len();
+        let max_peers = 50; // Assume max 50 peers for gauge
+        let peer_percent = ((peer_count as f64 / max_peers as f64) * 100.0).min(100.0) as u16;
+        
+        let peers_gauge = Gauge::default()
+            .block(Block::default().title(" CONNECTED PEERS "))
+            .gauge_style(Style::default().fg(ACCENT).bg(Color::Rgb(20, 20, 40)))
+            .percent(((peer_percent as f32 * animation_progress) as u16).min(100))
+            .label(format!("{}/{}", peer_count, max_peers));
+
+        // Active sessions gauge
+        let session_count = self.state.sessions.len();
+        let max_sessions = 100; // Assume max 100 sessions for gauge
+        let session_percent = ((session_count as f64 / max_sessions as f64) * 100.0).min(100.0) as u16;
+        
+        let sessions_gauge = Gauge::default()
+            .block(Block::default().title(" ACTIVE SESSIONS "))
+            .gauge_style(Style::default().fg(SUCCESS).bg(Color::Rgb(20, 40, 20)))
+            .percent(((session_percent as f32 * animation_progress) as u16).min(100))
+            .label(format!("{}/{}", session_count, max_sessions));
+
+        frame.render_widget(peers_gauge, chunks[0]);
+        frame.render_widget(sessions_gauge, chunks[1]);
+    }
+
+    fn render_peer_connections(&self, frame: &mut Frame<'_>, area: Rect) {
+        let header_cells = ["Peer ID", "Status", "Connection Type"]
+            .iter()
+            .map(|h| Cell::from(*h).style(Style::default().fg(PRIMARY).add_modifier(Modifier::BOLD)));
+        
+        let header = Row::new(header_cells)
+            .style(Style::default().bg(BACKGROUND))
+            .height(1)
+            .bottom_margin(1);
+
+        let rows: Vec<Row> = self.state.peers
+            .iter()
+            .map(|peer_id| {
+                let cells = vec![
+                    Cell::from(format!("{:.20}...", peer_id.to_string())),
+                    Cell::from("Connected").style(Style::default().fg(SUCCESS)),
+                    Cell::from("P2P").style(Style::default().fg(ACCENT)),
+                ];
+                Row::new(cells).height(1).bottom_margin(0)
+            })
+            .collect();
+
+        let table = Table::new(rows, [
+            Constraint::Min(25),
+            Constraint::Length(12),
+            Constraint::Length(15),
+        ])
+        .header(header)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(BORDER))
+                .title(" PEER CONNECTIONS ")
+                .title_alignment(Alignment::Center),
+        )
+        .style(Style::default().fg(FOREGROUND))
+        .row_highlight_style(Style::default().bg(PRIMARY).fg(BACKGROUND))
+        .highlight_symbol("❯ ");
+
+        frame.render_widget(table, area);
     }
 }
