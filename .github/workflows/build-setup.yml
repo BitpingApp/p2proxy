@@ -1,8 +1,18 @@
-- name: Add GitLab to known_hosts
+- name: Configure SSH for GitLab
   run: |
-    mkdir -p ~/.ssh
-    echo "gitlab.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBFSMqzJeV9rUzU4kWitGjeR4PWSa29SPqJ1fVkhtj3Hw9xjLVXVYrU9QlYWrOLXBpQ6KWjbjTDTdDkoohFzgbEY=" >> ~/.ssh/known_hosts
-    chmod 600 ~/.ssh/known_hosts
+    mkdir -p ~/.ssh ~/.cargo
+    cat >> ~/.ssh/config << EOF
+    Host *.gitlab.com gitlab.com
+        StrictHostKeyChecking no
+        UserKnownHostsFile /dev/null
+    EOF
+    chmod 600 ~/.ssh/config
+    
+    # Also configure Cargo to be more permissive with Git over SSH
+    cat >> ~/.cargo/config.toml << EOF
+    [net]
+    git-fetch-with-cli = true
+    EOF
 
 - name: Setup SSH Agent
   uses: webfactory/ssh-agent@v0.9.0
