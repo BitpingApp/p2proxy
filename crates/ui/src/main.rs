@@ -1,6 +1,5 @@
 use color_eyre::{
     eyre::{Context, ContextCompat, Result},
-    owo_colors::OwoColorize,
 };
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode},
@@ -12,7 +11,7 @@ use models::{events::Events, Counter, CounterClient};
 use ratatui::{
     prelude::*,
     widgets::{
-        Axis, Block, Borders, Chart, Clear, Dataset, Gauge, List, ListItem, Paragraph, Tabs, Wrap,
+        Block, Borders, Tabs,
     },
 };
 use std::{
@@ -26,8 +25,6 @@ use tracing::{debug, info, level_filters::LevelFilter};
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 use ui_state::{ConnectionStatus, ProxySession, UIState};
-
-use remoc::{rch::watch::ReceiverStream, ConnectExt};
 
 mod logs;
 // mod network;
@@ -391,67 +388,19 @@ async fn main() -> Result<()> {
     // }
 
     // Subscribe to the server state changes and create a channel for UI updates
-    let mut watch_rx = client
-        .subscribe()
+    let mut event_rx = client
+        .watch_events()
         .await
-        .context("Failed to get subscription")?;
+        .context("Failed to get event watcher")?;
     
     let (ui_tx, ui_rx) = tokio::sync::mpsc::channel(100);
     
-    // Spawn a task to handle remoc subscription updates
+    // Spawn a task to handle remoc event updates
     tokio::spawn(async move {
-        // Take the initial state
-        if let Some(initial_state) = watch_rx.take_initial() {
-            for (server, state) in initial_state {
-                info!(?server, ?state, "Initial server state");
-                // Convert server state to UI events
-                if let Some(peer_id) = state.local_peer_id {
-                    let _ = ui_tx.send(Events::LocalPeerId(peer_id)).await;
-                }
-                
-                let connection_event = match state.connection_status {
-                    models::ConnectionStatus::Connected => {
-                        Events::Connection(models::events::ConnectionEvents::Connected(
-                            state.local_peer_id.unwrap_or_default()
-                        ))
-                    }
-                    models::ConnectionStatus::Disconnected => {
-                        Events::Connection(models::events::ConnectionEvents::Disconnected)
-                    }
-                };
-                let _ = ui_tx.send(connection_event).await;
-            }
-        }
-        
         // Handle ongoing updates
         loop {
-            if let Ok(Some(update)) = watch_rx.recv().await {
-                match update {
-                    remoc::robs::hash_map::Update::Insert(server, state) |
-                    remoc::robs::hash_map::Update::Update(server, state) => {
-                        info!(?server, ?state, "Server state update");
-                        
-                        // Convert server state to UI events
-                        if let Some(peer_id) = state.local_peer_id {
-                            let _ = ui_tx.send(Events::LocalPeerId(peer_id)).await;
-                        }
-                        
-                        let connection_event = match state.connection_status {
-                            models::ConnectionStatus::Connected => {
-                                Events::Connection(models::events::ConnectionEvents::Connected(
-                                    state.local_peer_id.unwrap_or_default()
-                                ))
-                            }
-                            models::ConnectionStatus::Disconnected => {
-                                Events::Connection(models::events::ConnectionEvents::Disconnected)
-                            }
-                        };
-                        let _ = ui_tx.send(connection_event).await;
-                    }
-                    remoc::robs::hash_map::Update::Remove(server) => {
-                        info!(?server, "Server removed");
-                    }
-                }
+            if let Ok(Some(event)) = event_rx.recv().await {
+                let _ = ui_tx.send(event).await;
             }
         }
     });

@@ -17,8 +17,8 @@ publish-jobs = ["homebrew"]
 install-updater = false
 # Homebrew tap to publish to
 tap = "BitpingApp/homebrew-tap"
-
-github-build-setup = "../build-setup.yml"
+# Build setup steps to inject into CI
+github-build-setup = "build-setup.yml"
 # Post-announce jobs to run in CI
 post-announce-jobs = ["./docker-publish"]
 

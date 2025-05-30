@@ -14,21 +14,41 @@ on:
 
 jobs:
   docker:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     steps:
       - name: Parse plan
         id: plan
         run: |
-          # Extract the tag from plan.outputs.tag
+          # Extract the tag from the plan
           echo "Plan content for debugging:"
           echo '${{ inputs.plan }}' | jq .
-          VERSION=$(echo '${{ inputs.plan }}' | jq -r '.releases[0].app_version')
-          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          
+          # Get the tag from the plan
+          TAG=$(echo '${{ inputs.plan }}' | jq -r '.announcement_tag // empty')
+          if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
+            # Fallback: try to get version from releases
+            TAG=$(echo '${{ inputs.plan }}' | jq -r '.releases[0].app_version // empty')
+            if [ -n "$TAG" ] && [ "$TAG" != "null" ]; then
+              TAG="v$TAG"
+            fi
+          fi
+          
+          if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
+            echo "Could not determine tag from plan"
+            exit 1
+          fi
+          
+          echo "TAG=$TAG" >> $GITHUB_OUTPUT
+          echo "Using tag: $TAG"
 
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ steps.plan.outputs.VERSION }}
+          ref: ${{ steps.plan.outputs.TAG }}
+
+      - uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -49,7 +69,7 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            bitping/distributed-metrics:latest
-            bitping/distributed-metrics:${{ steps.plan.outputs.VERSION }}
+            bitping/p2proxy:latest
+            bitping/p2proxy:${{ steps.plan.outputs.TAG }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

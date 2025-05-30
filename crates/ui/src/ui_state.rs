@@ -138,6 +138,30 @@ impl UIState {
         }
     }
 
+    pub fn add_upload(&mut self, bytes: u64) {
+        self.total_upload += bytes;
+        
+        // Update upload rate (simplified - in real implementation you'd track over time)
+        let now = chrono::Utc::now();
+        self.upload_graph.push((now, bytes as f64 / 1024.0)); // Convert to KB
+        
+        // Keep only last 30 seconds of data
+        let cutoff_time = now - chrono::Duration::seconds(30);
+        self.upload_graph.retain(|(time, _)| *time >= cutoff_time);
+    }
+
+    pub fn add_download(&mut self, bytes: u64) {
+        self.total_download += bytes;
+        
+        // Update download rate (simplified - in real implementation you'd track over time)
+        let now = chrono::Utc::now();
+        self.download_graph.push((now, bytes as f64 / 1024.0)); // Convert to KB
+        
+        // Keep only last 30 seconds of data
+        let cutoff_time = now - chrono::Duration::seconds(30);
+        self.download_graph.retain(|(time, _)| *time >= cutoff_time);
+    }
+
     pub fn update_from_metrics(&mut self, metrics: PrometheusMetrics) {
         // Update totals
         self.total_upload = metrics.total_upload_bytes;
