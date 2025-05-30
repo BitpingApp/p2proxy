@@ -125,9 +125,11 @@ jobs:
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
             echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           fi
-      - name: "Configure SSH for GitLab"
+      - name: "Configure SSH and Cargo for GitLab"
         run: |
           mkdir -p ~/.ssh ~/.cargo
+
+          # Configure SSH to accept GitLab hosts without strict host checking
           cat >> ~/.ssh/config << EOF
           Host *.gitlab.com gitlab.com
               StrictHostKeyChecking no
@@ -135,11 +137,14 @@ jobs:
           EOF
           chmod 600 ~/.ssh/config
 
-          # Also configure Cargo to be more permissive with Git over SSH
+          # Configure Cargo to use Git CLI for all operations
           cat >> ~/.cargo/config.toml << EOF
           [net]
           git-fetch-with-cli = true
           EOF
+
+          # Also set environment variable for immediate effect
+          echo "CARGO_NET_GIT_FETCH_WITH_CLI=true" >> $GITHUB_ENV
       - name: "Setup SSH Agent"
         uses: "webfactory/ssh-agent@v0.9.0"
         with:
