@@ -1,3 +1,9 @@
+- name: Add GitLab to known_hosts
+  run: |
+    mkdir -p ~/.ssh
+    echo "gitlab.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBFSMqzJeV9rUzU4kWitGjeR4PWSa29SPqJ1fVkhtj3Hw9xjLVXVYrU9QlYWrOLXBpQ6KWjbjTDTdDkoohFzgbEY=" >> ~/.ssh/known_hosts
+    chmod 600 ~/.ssh/known_hosts
+
 - name: Setup SSH Agent
   uses: webfactory/ssh-agent@v0.9.0
   with:
