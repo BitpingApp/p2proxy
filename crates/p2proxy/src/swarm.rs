@@ -129,6 +129,12 @@ pub struct Bootstrapped {
         mpsc::Sender<SocksStreamMessage>,
         mpsc::Receiver<SocksStreamMessage>,
     ),
+    
+    // Bootstrap connection management
+    bootstrap_address: Multiaddr,
+    bootstrap_peer_id: Option<PeerId>,
+    bootstrap_connected: bool,
+    bootstrap_dialing: bool,
 }
 
 pub struct ProxyForwarding {
@@ -212,36 +218,77 @@ impl ProxyNetwork<NetworkConnect> {
                 models::events::ConnectionEvents::Connecting,
             ))
             .await;
+        
         let bootstrap = multiaddr::multiaddr!(Dnsaddr("boot1.bitping.com"));
-        swarm.dial(bootstrap.clone())?;
-
-        let bootstrap_peer_id = swarm
-            .wait_for(|swarm, event| {
-                if let SwarmEvent::Behaviour(BehaviourEvent::Identify(
-                    identify::Event::Received {
-                        connection_id: _,
-                        peer_id,
-                        info,
-                    },
-                )) = event
-                {
-                    for addr in &info.listen_addrs {
-                        let circuit_addr = addr
-                            .clone()
-                            .with_p2p(*peer_id)
-                            .ok()?
-                            .with(Protocol::P2pCircuit)
-                            .with_p2p(*swarm.local_peer_id())
-                            .ok()?;
-
-                        let _ = swarm.listen_on(circuit_addr);
+        
+        // Retry bootstrap connection until successful
+        let mut bootstrap_retry_count = 0;
+        const MAX_BOOTSTRAP_RETRIES: usize = 10;
+        
+        let bootstrap_peer_id = loop {
+            match swarm.dial(bootstrap.clone()) {
+                Ok(_) => {
+                    info!("Attempting to connect to bootstrap server (attempt {}/{})", 
+                          bootstrap_retry_count + 1, MAX_BOOTSTRAP_RETRIES);
+                },
+                Err(e) => {
+                    warn!(?e, "Failed to dial bootstrap server");
+                    if bootstrap_retry_count >= MAX_BOOTSTRAP_RETRIES {
+                        bail!("Failed to dial bootstrap server after {} attempts", MAX_BOOTSTRAP_RETRIES);
                     }
-                    Some(*peer_id)
-                } else {
-                    None
+                    bootstrap_retry_count += 1;
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    continue;
                 }
-            })
-            .await;
+            }
+
+            // Wait for identify event with timeout
+            match swarm
+                .wait_for_with_timeout(
+                    |swarm, event| {
+                        if let SwarmEvent::Behaviour(BehaviourEvent::Identify(
+                            identify::Event::Received {
+                                connection_id: _,
+                                peer_id,
+                                info,
+                            },
+                        )) = event
+                        {
+                            for addr in &info.listen_addrs {
+                                let circuit_addr = addr
+                                    .clone()
+                                    .with_p2p(*peer_id)
+                                    .ok()?
+                                    .with(Protocol::P2pCircuit)
+                                    .with_p2p(*swarm.local_peer_id())
+                                    .ok()?;
+
+                                let _ = swarm.listen_on(circuit_addr);
+                            }
+                            Some(*peer_id)
+                        } else {
+                            None
+                        }
+                    },
+                    Duration::from_secs(10),
+                )
+                .await
+            {
+                Ok(peer_id) => {
+                    info!("Successfully connected to bootstrap server");
+                    break peer_id;
+                }
+                Err(_) => {
+                    warn!("Bootstrap connection timeout");
+                    if bootstrap_retry_count >= MAX_BOOTSTRAP_RETRIES {
+                        bail!("Failed to connect to bootstrap server after {} attempts", MAX_BOOTSTRAP_RETRIES);
+                    }
+                    bootstrap_retry_count += 1;
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    continue;
+                }
+            }
+        };
 
         info!("Waiting for Relay reservation.");
 
@@ -272,7 +319,7 @@ impl ProxyNetwork<NetworkConnect> {
 
         info!(%relay_peer_id, %renewal, ?limit, "Reservation accepted, time to connect to peer.");
 
-        let Ok(relay_address) = bootstrap.with_p2p(bootstrap_peer_id) else {
+        let Ok(relay_address) = bootstrap.clone().with_p2p(bootstrap_peer_id) else {
             bail!("Could not construct relay multiaddr")
         };
 
@@ -283,6 +330,10 @@ impl ProxyNetwork<NetworkConnect> {
             relay_address,
             relay_peer_id,
             proxy_message_channel: mpsc::channel(1000),
+            bootstrap_address: bootstrap,
+            bootstrap_peer_id: Some(bootstrap_peer_id),
+            bootstrap_connected: true,
+            bootstrap_dialing: false,
         }))
     }
 }
@@ -510,7 +561,30 @@ impl ProxyNetwork<Bootstrapped> {
         Ok(destination_address)
     }
 
+    /// Attempt to dial the bootstrap server if not already connected or dialing
+    fn try_dial_bootstrap(&mut self) {
+        if !self.0.bootstrap_connected && !self.0.bootstrap_dialing {
+            info!("Attempting to dial bootstrap server");
+            match self.0.swarm.dial(self.0.bootstrap_address.clone()) {
+                Ok(_) => {
+                    self.0.bootstrap_dialing = true;
+                    debug!("Bootstrap dial initiated");
+                }
+                Err(e) => {
+                    warn!(?e, "Failed to dial bootstrap server");
+                }
+            }
+        }
+    }
+
     pub async fn drive_network(mut self, server_state: Arc<RwLock<ServerContainer>>) -> Result<()> {
+        // Initial bootstrap dial check
+        self.try_dial_bootstrap();
+        
+        // Bootstrap reconnection timer
+        let mut bootstrap_retry_timer = tokio::time::interval(Duration::from_secs(5));
+        bootstrap_retry_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        
         // Main event loop
         loop {
             tokio::select! {
@@ -520,7 +594,11 @@ impl ProxyNetwork<Bootstrapped> {
                     }
                 },
                 Some(event) = self.0.swarm.next() => {
-                    handle_swarm_events(event, server_state.clone());
+                    self.handle_swarm_events_with_bootstrap(event, server_state.clone());
+                }
+                _ = bootstrap_retry_timer.tick() => {
+                    // Periodically check if we need to reconnect to bootstrap
+                    self.try_dial_bootstrap();
                 }
             };
         }
@@ -647,6 +725,37 @@ impl ProxyNetwork<Bootstrapped> {
         }
 
         Ok(())
+    }
+
+    /// Handle swarm events with bootstrap connection management
+    fn handle_swarm_events_with_bootstrap(&mut self, event: SwarmEvent<BehaviourEvent>, server_state: Arc<RwLock<ServerContainer>>) {
+        // Handle bootstrap-specific events
+        match &event {
+            SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+                if Some(*peer_id) == self.0.bootstrap_peer_id {
+                    info!("Bootstrap connection established");
+                    self.0.bootstrap_connected = true;
+                    self.0.bootstrap_dialing = false;
+                }
+            }
+            SwarmEvent::ConnectionClosed { peer_id, .. } => {
+                if Some(*peer_id) == self.0.bootstrap_peer_id {
+                    warn!("Bootstrap connection lost");
+                    self.0.bootstrap_connected = false;
+                    self.0.bootstrap_dialing = false;
+                }
+            }
+            SwarmEvent::OutgoingConnectionError { peer_id, .. } => {
+                if peer_id.as_ref() == self.0.bootstrap_peer_id.as_ref() {
+                    warn!("Bootstrap connection failed");
+                    self.0.bootstrap_dialing = false;
+                }
+            }
+            _ => {}
+        }
+        
+        // Delegate to the original handler
+        handle_swarm_events(event, server_state);
     }
 }
 
