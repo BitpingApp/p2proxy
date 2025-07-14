@@ -13,6 +13,7 @@ use socks5_impl::protocol::{
 };
 use std::{
     io,
+    net::SocketAddr,
     pin::Pin,
     task::{Context, Poll},
 };
@@ -109,7 +110,7 @@ pub async fn create_socks_proxy_stream(
     control: p2p_stream::Control,
     sender: mpsc::Sender<SocksStreamMessage>,
 ) -> Result<()> {
-    let listener = TcpListener::bind(("localhost", server_config.port)).await?;
+    let listener = TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], server_config.port))).await?;
     counter!("p2proxy_socks_server_started_total").increment(1);
     gauge!("p2proxy_socks_servers_active").increment(1.0);
     info!("SOCKS5 proxy listening");

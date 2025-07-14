@@ -6,6 +6,6 @@ log_level: info
 servers:
   - protocol: Socks5
     port: 1080
-    # country: NZ
+    country: AU
     min_bandwidth: 70Mbps
     # destination_peer: /ip6/YOUR_IPV6_ADDR/udp/SOEMTHING/quic-v1/p2p/12D3KooWSAoUzgpG8fSgaHP6n4Nfqimj7RPX86ayrkTQeoTJtrsB    

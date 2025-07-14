@@ -1,0 +1,88 @@
+
+stages:
+  - build
+  - docker
+
+variables:
+  CARGO_HOME: $CI_PROJECT_DIR/.cargo
+  RUST_VERSION: "1.82.0"
+
+before_script:
+  - rustup default $RUST_VERSION
+  - cargo install sccache
+  - export RUSTC_WRAPPER=$(which sccache)
+
+build-linux-x86_64:
+  stage: build
+  image: ghcr.io/cargo-zigbuild/cargo-zigbuild:latest
+  tags:
+    - kubernetes
+  script:
+    - cargo zigbuild --target x86_64-unknown-linux-gnu --release
+  artifacts:
+    paths:
+      - target/x86_64-unknown-linux-gnu/release/p2proxy
+
+build-linux-aarch64:
+  stage: build
+  image: ghcr.io/cargo-zigbuild/cargo-zigbuild:latest
+  tags:
+    - kubernetes
+  script:
+    - cargo zigbuild --target aarch64-unknown-linux-gnu --release
+  artifacts:
+    paths:
+      - target/aarch64-unknown-linux-gnu/release/p2proxy
+
+build-windows-x86_64:
+  stage: build
+  image: rust:latest
+  tags:
+    - kubernetes
+  script:
+    - cargo install cargo-xwin
+    - cargo xwin build --target x86_64-pc-windows-msvc --release
+  artifacts:
+    paths:
+      - target/x86_64-pc-windows-msvc/release/p2proxy.exe
+
+build-macos-x86_64:
+  stage: build
+  image: rust:latest
+  tags:
+    - macos
+    - shell
+  script:
+    - cargo build --target x86_64-apple-darwin --release
+  artifacts:
+    paths:
+      - target/x86_64-apple-darwin/release/p2proxy
+
+build-macos-aarch64:
+  stage: build
+  image: rust:latest
+  tags:
+    - macos
+    - shell
+  script:
+    - cargo build --target aarch64-apple-darwin --release
+  artifacts:
+    paths:
+      - target/aarch64-apple-darwin/release/p2proxy
+
+build-docker:
+  stage: docker
+  image: docker:stable
+  tags:
+    - kubernetes
+  services:
+    - docker:dind
+  script:
+    - docker build -t p2proxy:latest .
+  artifacts:
+    paths:
+      - p2proxy-latest.tar
+    when: on_success
+    expire_in: 1 week
+  after_script:
+    - docker save p2proxy:latest > p2proxy-latest.tar 
