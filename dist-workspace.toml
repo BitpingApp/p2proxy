@@ -19,6 +19,7 @@ install-updater = false
 tap = "BitpingApp/homebrew-tap"
 # Build setup steps to inject into CI
 github-build-setup = "build-setup.yml"
+
 # Post-announce jobs to run in CI
 post-announce-jobs = ["./docker-publish"]
 
