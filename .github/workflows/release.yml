@@ -86,12 +86,17 @@ jobs:
           name: artifacts-plan-dist-manifest
           path: plan-dist-manifest.json
 
+  custom-build-setup.yml:
+    uses: ./.github/workflows/build-setup.yml.yml
+    secrets: inherit
+
   # Build and packages all the platform-specific things
   build-local-artifacts:
     name: build-local-artifacts (${{ join(matrix.targets, ', ') }})
     # Let the initial task tell us to not run (currently very blunt)
     needs:
       - plan
+      - custom-build-setup.yml
     if: ${{ fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix.include != null && (needs.plan.outputs.publishing == 'true' || fromJson(needs.plan.outputs.val).ci.github.pr_run_mode == 'upload') }}
     strategy:
       fail-fast: false
@@ -125,61 +130,6 @@ jobs:
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
             echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           fi
-      - name: "Configure SSH and Cargo for GitLab"
-        run: |
-          mkdir -p ~/.ssh ~/.cargo
-
-          # Configure SSH to accept GitLab hosts without strict host checking
-          cat >> ~/.ssh/config << EOF
-          Host *.gitlab.com gitlab.com
-              StrictHostKeyChecking no
-              UserKnownHostsFile /dev/null
-          EOF
-          chmod 600 ~/.ssh/config
-
-          # Configure Cargo to use Git CLI for all operations
-          cat >> ~/.cargo/config.toml << EOF
-          [net]
-          git-fetch-with-cli = true
-          EOF
-
-          # Also set environment variable for immediate effect
-          echo "CARGO_NET_GIT_FETCH_WITH_CLI=true" >> $GITHUB_ENV
-      - name: "Install build dependencies (Linux)"
-        if: "runner.os == 'Linux'"
-        run: |
-          sudo apt-get update
-          sudo apt-get update
-          # Install latest GCC (currently GCC 13)
-          sudo apt-get install -y cmake gcc g++
-      - name: "Rust Cache"
-        uses: "Swatinem/rust-cache@v2"
-        with:
-          "cache-all-crates": "true"
-          "cache-on-failure": "true"
-          "cache-targets": "true"
-          "prefix-key": "v1-rust"
-          "save-if": "${{ github.ref == 'refs/heads/master' }}"
-          "shared-key": "${{ matrix.target }}-build"
-          "workspaces": ". -> target\n"
-      - name: "Setup SSH Agent"
-        uses: "webfactory/ssh-agent@v0.9.0"
-        with:
-          "ssh-private-key": "${{ secrets.SSH_PRIVATE_KEY }}"
-      - name: "Generate a changelog"
-        uses: "orhun/git-cliff-action@v3"
-        with:
-          "args": "--verbose --latest --tag ${{ github.ref_name }}"
-          "config": "cliff.toml"
-        env:
-          "GITHUB_REPO": "${{ github.repository }}"
-          "OUTPUT": "CHANGELOG.md"
-      - name: "Upload Generated Changelog as Artifact"
-        uses: "actions/upload-artifact@v4"
-        with:
-          "name": "generated-changelog"
-          "path": "CHANGELOG.md"
-          "retention-days": 1
       - name: Install dist
         run: ${{ matrix.install_dist.run }}
       # Get the dist-manifest
