@@ -145,10 +145,41 @@ jobs:
 
           # Also set environment variable for immediate effect
           echo "CARGO_NET_GIT_FETCH_WITH_CLI=true" >> $GITHUB_ENV
+      - name: "Install build dependencies (Linux)"
+        if: "runner.os == 'Linux'"
+        run: |
+          sudo apt-get update
+          sudo apt-get update
+          # Install latest GCC (currently GCC 13)
+          sudo apt-get install -y cmake gcc g++
+      - name: "Rust Cache"
+        uses: "Swatinem/rust-cache@v2"
+        with:
+          "cache-all-crates": "true"
+          "cache-on-failure": "true"
+          "cache-targets": "true"
+          "prefix-key": "v1-rust"
+          "save-if": "${{ github.ref == 'refs/heads/master' }}"
+          "shared-key": "${{ matrix.target }}-build"
+          "workspaces": ". -> target\n"
       - name: "Setup SSH Agent"
         uses: "webfactory/ssh-agent@v0.9.0"
         with:
           "ssh-private-key": "${{ secrets.SSH_PRIVATE_KEY }}"
+      - name: "Generate a changelog"
+        uses: "orhun/git-cliff-action@v3"
+        with:
+          "args": "--verbose --latest --tag ${{ github.ref_name }}"
+          "config": "cliff.toml"
+        env:
+          "GITHUB_REPO": "${{ github.repository }}"
+          "OUTPUT": "CHANGELOG.md"
+      - name: "Upload Generated Changelog as Artifact"
+        uses: "actions/upload-artifact@v4"
+        with:
+          "name": "generated-changelog"
+          "path": "CHANGELOG.md"
+          "retention-days": 1
       - name: Install dist
         run: ${{ matrix.install_dist.run }}
       # Get the dist-manifest
