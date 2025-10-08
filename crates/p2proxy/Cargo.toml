@@ -55,3 +55,21 @@ tachyonfx = "0.14"
 ratatui-splash-screen = "0.1.4"
 chrono = "0.4.40"
 remoc.workspace = true
+
+[dev-dependencies]
+tokio-test = "0.4"
+criterion = { version = "0.5", features = ["async_tokio"] }
+proptest = "1.4"
+mockall = "0.12"
+serial_test = "3.0"
+tempfile = "3.8"
+assert_matches = "1.5"
+human-bandwidth = { version = "0.1.3", features = ["serde"] }
+
+[[bench]]
+name = "throughput_bench"
+harness = false
+
+[[bench]]
+name = "latency_bench"
+harness = false
