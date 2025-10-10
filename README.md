@@ -251,12 +251,6 @@ Key dependencies include:
 - **tracing**: Logging and observability
 - **prometheus**: Metrics collection
 
-### Running Tests
-
-```bash
-cargo test
-```
-
 ### Development Setup
 
 1. Clone the repository with SSH access
@@ -266,6 +260,71 @@ cargo test
    cargo run --bin p2proxy
    cargo run --bin ui
    ```
+
+## Testing
+
+P2Proxy includes a comprehensive test suite covering connection handling, disconnection scenarios, throughput, latency/jitter analysis, and long-term stability.
+
+### Quick Start
+
+Run all tests:
+```bash
+cargo test --all --verbose
+```
+
+Run specific test categories:
+```bash
+# Connection tests
+cargo test --test connection_tests
+
+# Disconnection tests
+cargo test --test disconnection_tests
+
+# Throughput tests
+cargo test --test throughput_tests
+
+# Jitter/latency tests
+cargo test --test jitter_tests
+
+# Stability tests (quick)
+cargo test --test stability_tests
+```
+
+### Running Benchmarks
+
+Performance benchmarks use the Criterion framework:
+```bash
+# Run all benchmarks
+cargo bench
+
+# Run specific benchmarks
+cargo bench --bench throughput_bench
+cargo bench --bench latency_bench
+
+# Compile benchmarks only (for CI)
+cargo bench --no-run
+```
+
+### Long-Running Tests
+
+Some stability tests take hours to complete and are marked with `#[ignore]`:
+```bash
+# Run long-running tests (6-24 hours)
+cargo test -- --ignored --nocapture
+
+# Run specific long test
+cargo test test_24hour_connection_stability -- --ignored --nocapture
+```
+
+### Test Structure
+
+- **Connection Tests**: P2P connection establishment, SOCKS5 proxy, RPC communication
+- **Disconnection Tests**: Graceful disconnection, network failures, error handling
+- **Throughput Tests**: Bandwidth measurement, performance validation
+- **Jitter Tests**: Latency characteristics, timing consistency
+- **Stability Tests**: Long-running connections, memory leak detection, stress testing
+
+For detailed testing documentation, see [crates/p2proxy/tests/README.md](crates/p2proxy/tests/README.md).
 
 ### Releases
 

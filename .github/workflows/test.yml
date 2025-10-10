@@ -1,0 +1,100 @@
+name: Tests
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Run tests
+        run: cargo test --all --verbose
+        env:
+          RUST_BACKTRACE: 1
+
+      - name: Compile benchmarks
+        run: cargo bench --no-run
+        env:
+          RUST_BACKTRACE: 1
+
+  # Optional: Long-running tests on a weekly schedule
+  long-running-tests:
+    name: Long-running tests (weekly)
+    runs-on: ubuntu-latest
+    # Run every Sunday at 00:00 UTC
+    if: github.event_name == 'schedule' || contains(github.event.head_commit.message, '[run-long-tests]')
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-long-tests-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-long-tests-
+            ${{ runner.os }}-cargo-
+
+      - name: Run long-running tests
+        run: cargo test --all -- --ignored --nocapture
+        env:
+          RUST_BACKTRACE: 1
+        timeout-minutes: 180
+
+# Uncomment to enable weekly schedule
+# on:
+#   schedule:
+#     - cron: '0 0 * * 0'  # Every Sunday at 00:00 UTC

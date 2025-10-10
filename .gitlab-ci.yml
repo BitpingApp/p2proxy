@@ -1,0 +1,186 @@
+# GitLab CI/CD Configuration for P2Proxy
+# Runs tests, benchmarks, and validates the build
+
+stages:
+  - test
+  - benchmark
+  - long-running
+
+variables:
+  CARGO_HOME: $CI_PROJECT_DIR/.cargo
+  RUST_BACKTRACE: "1"
+
+# Cache Cargo dependencies for faster builds
+.cache_template: &cache_definition
+  cache:
+    key:
+      files:
+        - Cargo.lock
+    paths:
+      - .cargo/bin/
+      - .cargo/registry/index/
+      - .cargo/registry/cache/
+      - .cargo/git/db/
+      - target/
+
+# Test job - runs on every push and MR
+test:
+  stage: test
+  image: rust:latest
+  <<: *cache_definition
+  script:
+    - rustc --version
+    - cargo --version
+    - echo "Running all tests..."
+    - cargo test --all --verbose
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "master"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+# Test job for macOS (if you have macOS runners)
+test:macos:
+  stage: test
+  tags:
+    - macos
+  <<: *cache_definition
+  script:
+    - rustc --version
+    - cargo --version
+    - echo "Running all tests on macOS..."
+    - cargo test --all --verbose
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "master"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+  allow_failure: true  # Don't block pipeline if no macOS runner available
+
+# Benchmark compilation (doesn't run benchmarks in CI)
+benchmark:compile:
+  stage: benchmark
+  image: rust:latest
+  <<: *cache_definition
+  script:
+    - echo "Compiling benchmarks..."
+    - cargo bench --no-run
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "master"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+  allow_failure: false
+
+# Connection tests
+test:connection:
+  stage: test
+  image: rust:latest
+  <<: *cache_definition
+  script:
+    - echo "Running connection tests..."
+    - cargo test --test connection_tests --verbose
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "master"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+# Disconnection tests
+test:disconnection:
+  stage: test
+  image: rust:latest
+  <<: *cache_definition
+  script:
+    - echo "Running disconnection tests..."
+    - cargo test --test disconnection_tests --verbose
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "master"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+# Throughput tests
+test:throughput:
+  stage: test
+  image: rust:latest
+  <<: *cache_definition
+  script:
+    - echo "Running throughput tests..."
+    - cargo test --test throughput_tests --verbose
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "master"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+# Jitter tests
+test:jitter:
+  stage: test
+  image: rust:latest
+  <<: *cache_definition
+  script:
+    - echo "Running jitter tests..."
+    - cargo test --test jitter_tests --verbose
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "master"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+# Stability tests (quick only, not long-running)
+test:stability:
+  stage: test
+  image: rust:latest
+  <<: *cache_definition
+  script:
+    - echo "Running stability tests (quick)..."
+    - cargo test --test stability_tests --verbose
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "master"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+# Long-running tests (manual trigger only or scheduled)
+test:long-running:
+  stage: long-running
+  image: rust:latest
+  <<: *cache_definition
+  timeout: 48h
+  script:
+    - echo "Running long-running stability tests..."
+    - cargo test -- --ignored --nocapture
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: always
+    - if: '$CI_COMMIT_MESSAGE =~ /\[run-long-tests\]/'
+      when: always
+    - when: manual
+  allow_failure: true
+
+# Lint and format check
+lint:
+  stage: test
+  image: rust:latest
+  <<: *cache_definition
+  script:
+    - rustup component add clippy rustfmt
+    - echo "Running cargo fmt check..."
+    - cargo fmt -- --check
+    - echo "Running cargo clippy..."
+    - cargo clippy --all-targets --all-features -- -D warnings
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "master"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+  allow_failure: true  # Don't block on linting issues
+
+# Build check
+build:
+  stage: test
+  image: rust:latest
+  <<: *cache_definition
+  script:
+    - echo "Building release binaries..."
+    - cargo build --release --all
+  artifacts:
+    paths:
+      - target/release/p2proxy
+      - target/release/ui
+    expire_in: 1 week
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "master"'
+    - if: '$CI_COMMIT_BRANCH == "main"'

@@ -36,8 +36,58 @@ cargo run --bin ui
 ```
 
 ### Testing
+
+Run all tests:
 ```bash
-cargo test
+cargo test --all --verbose
+```
+
+Run specific test categories:
+```bash
+# Connection tests (P2P, SOCKS5, RPC)
+cargo test --test connection_tests
+
+# Disconnection tests (failures, cleanup)
+cargo test --test disconnection_tests
+
+# Throughput tests (bandwidth, performance)
+cargo test --test throughput_tests
+
+# Jitter tests (latency, timing)
+cargo test --test jitter_tests
+
+# Stability tests (quick)
+cargo test --test stability_tests
+
+# Long-running tests (6-24 hours, marked with #[ignore])
+cargo test -- --ignored --nocapture
+```
+
+Run tests with logging:
+```bash
+RUST_LOG=debug cargo test test_name -- --nocapture
+RUST_LOG=trace cargo test -- --nocapture
+```
+
+### Benchmarks
+
+Run performance benchmarks:
+```bash
+# All benchmarks
+cargo bench
+
+# Specific benchmarks
+cargo bench --bench throughput_bench
+cargo bench --bench latency_bench
+
+# Compile only (for CI)
+cargo bench --no-run
+```
+
+View benchmark reports:
+```bash
+open target/criterion/report/index.html  # macOS
+xdg-open target/criterion/report/index.html  # Linux
 ```
 
 ### Docker
@@ -102,6 +152,84 @@ Prometheus metrics are exposed at `http://localhost:9091/metrics` and include co
 ### Node Identity
 
 The application generates and persists a libp2p keypair in `node_keypair.bin` for consistent peer identity across restarts.
+
+## Testing Infrastructure
+
+P2Proxy has a comprehensive test suite with the following structure:
+
+### Test Categories
+
+1. **Connection Tests** (`crates/p2proxy/tests/connection_tests.rs`)
+   - P2P connection establishment (direct and relay-mediated)
+   - SOCKS5 proxy functionality
+   - RPC communication between daemon and UI
+   - Multiple concurrent peer connections
+
+2. **Disconnection Tests** (`crates/p2proxy/tests/disconnection_tests.rs`)
+   - Graceful disconnection and cleanup
+   - Network failure handling
+   - Authentication failures
+   - Resource cleanup verification
+
+3. **Throughput Tests** (`crates/p2proxy/tests/throughput_tests.rs`)
+   - Bandwidth measurement accuracy (±1%)
+   - Single and concurrent session performance
+   - Hash verification for data integrity
+   - Performance targets (>80% of direct TCP)
+
+4. **Jitter Tests** (`crates/p2proxy/tests/jitter_tests.rs`)
+   - Round-trip time (RTT) measurement
+   - Latency percentiles (p50, p95, p99)
+   - Jitter analysis (RFC 3550)
+   - Performance targets (<100ms direct, <250ms relay)
+
+5. **Stability Tests** (`crates/p2proxy/tests/stability_tests.rs`)
+   - Long-running connection tests (24 hours, marked with `#[ignore]`)
+   - Memory leak detection
+   - Reconnection logic and exponential backoff
+   - Stress testing and resource exhaustion
+
+### Test Utilities
+
+The test suite includes reusable infrastructure in `crates/p2proxy/tests/common/`:
+- **fixtures.rs**: Test data generators, configurations, and keypairs
+- **test_utils.rs**: Helper functions for bandwidth/latency measurement
+- **mock_swarm.rs**: Mock libp2p Swarm for testing
+- **mock_peer.rs**: Mock peer nodes
+- **mock_relay.rs**: Mock relay servers
+
+### Benchmarks
+
+Performance benchmarks in `crates/p2proxy/benches/`:
+- **throughput_bench.rs**: Throughput measurements
+- **latency_bench.rs**: Latency measurements
+
+All benchmarks use the Criterion framework with statistical analysis.
+
+### CI Integration
+
+Tests run automatically on push and pull requests:
+
+**GitHub Actions** (`.github/workflows/test.yml`):
+- Matrix testing on Ubuntu and macOS
+- Cargo dependency caching for faster builds
+- Standard tests run in 3-8 minutes
+- Benchmark compilation (no execution in CI)
+- Optional weekly schedule for long-running tests
+
+**GitLab CI** (`.gitlab-ci.yml`):
+- Parallel test execution per category
+- Cargo caching for faster builds
+- Optional macOS runner support
+- Manual/scheduled long-running tests (48-hour timeout)
+- Lint and format checks
+- Release artifact generation
+
+### Documentation
+
+Comprehensive test documentation available at:
+- **crates/p2proxy/tests/README.md**: Complete testing guide
+- Includes troubleshooting, platform-specific issues, and contribution guidelines
 
 ## Release Process
 
