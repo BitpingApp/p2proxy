@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::{sync::LazyLock, time::Duration};
 
 use crate::proxy_protocols::socks_stream::{DataDirection, SocksStreamMessage};
+use crate::stream_pool::{PoolConfig, StreamPool};
 use crate::utils::wait_ext::SwarmWaitExt;
 use crate::CONFIG;
 use crate::{proxy_protocols, GRPC_CHANNEL};
@@ -129,7 +130,10 @@ pub struct Bootstrapped {
         mpsc::Sender<SocksStreamMessage>,
         mpsc::Receiver<SocksStreamMessage>,
     ),
-    
+
+    // Stream pool for connection reuse
+    stream_pool: Arc<StreamPool>,
+
     // Bootstrap connection management
     bootstrap_address: Multiaddr,
     bootstrap_peer_id: Option<PeerId>,
@@ -218,23 +222,29 @@ impl ProxyNetwork<NetworkConnect> {
                 models::events::ConnectionEvents::Connecting,
             ))
             .await;
-        
-        let bootstrap = multiaddr::multiaddr!(Dnsaddr("boot1.bitping.com"));
-        
+
+        let bootstrap = multiaddr::multiaddr!(Dnsaddr("boot2.bitping.com"));
+
         // Retry bootstrap connection until successful
         let mut bootstrap_retry_count = 0;
         const MAX_BOOTSTRAP_RETRIES: usize = 10;
-        
+
         let bootstrap_peer_id = loop {
             match swarm.dial(bootstrap.clone()) {
                 Ok(_) => {
-                    info!("Attempting to connect to bootstrap server (attempt {}/{})", 
-                          bootstrap_retry_count + 1, MAX_BOOTSTRAP_RETRIES);
-                },
+                    info!(
+                        "Attempting to connect to bootstrap server (attempt {}/{})",
+                        bootstrap_retry_count + 1,
+                        MAX_BOOTSTRAP_RETRIES
+                    );
+                }
                 Err(e) => {
                     warn!(?e, "Failed to dial bootstrap server");
                     if bootstrap_retry_count >= MAX_BOOTSTRAP_RETRIES {
-                        bail!("Failed to dial bootstrap server after {} attempts", MAX_BOOTSTRAP_RETRIES);
+                        bail!(
+                            "Failed to dial bootstrap server after {} attempts",
+                            MAX_BOOTSTRAP_RETRIES
+                        );
                     }
                     bootstrap_retry_count += 1;
                     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -281,7 +291,10 @@ impl ProxyNetwork<NetworkConnect> {
                 Err(_) => {
                     warn!("Bootstrap connection timeout");
                     if bootstrap_retry_count >= MAX_BOOTSTRAP_RETRIES {
-                        bail!("Failed to connect to bootstrap server after {} attempts", MAX_BOOTSTRAP_RETRIES);
+                        bail!(
+                            "Failed to connect to bootstrap server after {} attempts",
+                            MAX_BOOTSTRAP_RETRIES
+                        );
                     }
                     bootstrap_retry_count += 1;
                     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -323,6 +336,11 @@ impl ProxyNetwork<NetworkConnect> {
             bail!("Could not construct relay multiaddr")
         };
 
+        // Create stream pool with default config (will be overridden per server)
+        let pool_config = PoolConfig::default();
+        let stream_control = swarm.behaviour().stream.new_control();
+        let stream_pool = StreamPool::new(stream_control, pool_config);
+
         Ok(ProxyNetwork(Bootstrapped {
             swarm,
             token: self.0.token,
@@ -330,6 +348,7 @@ impl ProxyNetwork<NetworkConnect> {
             relay_address,
             relay_peer_id,
             proxy_message_channel: mpsc::channel(1000),
+            stream_pool,
             bootstrap_address: bootstrap,
             bootstrap_peer_id: Some(bootstrap_peer_id),
             bootstrap_connected: true,
@@ -352,7 +371,7 @@ impl ProxyNetwork<Bootstrapped> {
             &KEYPAIR,
             self.0.token.to_string(),
             destination_peer_id,
-            self.0.swarm.behaviour().stream.new_control(),
+            self.0.stream_pool.clone(),
             self.0.proxy_message_channel.0.clone(),
         )
         .await?;
@@ -580,11 +599,11 @@ impl ProxyNetwork<Bootstrapped> {
     pub async fn drive_network(mut self, server_state: Arc<RwLock<ServerContainer>>) -> Result<()> {
         // Initial bootstrap dial check
         self.try_dial_bootstrap();
-        
+
         // Bootstrap reconnection timer
         let mut bootstrap_retry_timer = tokio::time::interval(Duration::from_secs(5));
         bootstrap_retry_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        
+
         // Main event loop
         loop {
             tokio::select! {
@@ -620,7 +639,7 @@ impl ProxyNetwork<Bootstrapped> {
                     "New session: {} to {:?} via {}",
                     session_id, target_addr, peer
                 );
-                
+
                 // Send session event to ServerContainer
                 let event = Events::Session(models::events::SessionEvents::New(
                     session_id,
@@ -637,7 +656,7 @@ impl ProxyNetwork<Bootstrapped> {
                 match direction {
                     DataDirection::Incoming => {
                         counter!("p2proxy_download_bytes_total").increment(bytes as u64);
-                        
+
                         // Send bandwidth event to ServerContainer
                         let event = Events::Bandwidth(models::events::BandwidthEvents::Download(
                             session_id,
@@ -647,7 +666,7 @@ impl ProxyNetwork<Bootstrapped> {
                     }
                     DataDirection::Outgoing => {
                         counter!("p2proxy_upload_bytes_total").increment(bytes as u64);
-                        
+
                         // Send bandwidth event to ServerContainer
                         let event = Events::Bandwidth(models::events::BandwidthEvents::Upload(
                             session_id,
@@ -688,7 +707,7 @@ impl ProxyNetwork<Bootstrapped> {
                     ?report,
                     "Session finished.",
                 );
-                
+
                 // Send session end event to ServerContainer
                 let event = Events::Session(models::events::SessionEvents::End(session_id));
                 server_state.write().await.handle_event(event).await;
@@ -728,7 +747,11 @@ impl ProxyNetwork<Bootstrapped> {
     }
 
     /// Handle swarm events with bootstrap connection management
-    fn handle_swarm_events_with_bootstrap(&mut self, event: SwarmEvent<BehaviourEvent>, server_state: Arc<RwLock<ServerContainer>>) {
+    fn handle_swarm_events_with_bootstrap(
+        &mut self,
+        event: SwarmEvent<BehaviourEvent>,
+        server_state: Arc<RwLock<ServerContainer>>,
+    ) {
         // Handle bootstrap-specific events
         match &event {
             SwarmEvent::ConnectionEstablished { peer_id, .. } => {
@@ -753,13 +776,16 @@ impl ProxyNetwork<Bootstrapped> {
             }
             _ => {}
         }
-        
+
         // Delegate to the original handler
         handle_swarm_events(event, server_state);
     }
 }
 
-fn handle_swarm_events(event: SwarmEvent<BehaviourEvent>, server_state: Arc<RwLock<ServerContainer>>) {
+fn handle_swarm_events(
+    event: SwarmEvent<BehaviourEvent>,
+    server_state: Arc<RwLock<ServerContainer>>,
+) {
     match event {
         SwarmEvent::ConnectionEstablished {
             peer_id, endpoint, ..
@@ -769,7 +795,7 @@ fn handle_swarm_events(event: SwarmEvent<BehaviourEvent>, server_state: Arc<RwLo
             gauge!("p2proxy_peers_connected").increment(1.0);
 
             info!("Connection established with peer: {}", peer_id);
-            
+
             // Send connection event to ServerContainer
             let event = Events::Connection(models::events::ConnectionEvents::Connected(peer_id));
             tokio::spawn(async move {
@@ -781,7 +807,7 @@ fn handle_swarm_events(event: SwarmEvent<BehaviourEvent>, server_state: Arc<RwLo
             gauge!("p2proxy_peers_connected").decrement(1.0);
 
             info!("Connection closed with peer: {}", peer_id);
-            
+
             // Send disconnection event to ServerContainer
             let event = Events::Connection(models::events::ConnectionEvents::Disconnected);
             tokio::spawn(async move {

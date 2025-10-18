@@ -1,11 +1,17 @@
 port: 45445
 
 # Logging configuration
-log_level: info
+log_level: debug
 
 servers:
   - protocol: Socks5
     port: 1080
     country: AT
     min_bandwidth: 70Mbps
-    # destination_peer: /ip6/YOUR_IPV6_ADDR/udp/SOEMTHING/quic-v1/p2p/12D3KooWSAoUzgpG8fSgaHP6n4Nfqimj7RPX86ayrkTQeoTJtrsB    
+    # destination_peer: /ip6/YOUR_IPV6_ADDR/udp/SOEMTHING/quic-v1/p2p/12D3KooWSAoUzgpG8fSgaHP6n4Nfqimj7RPX86ayrkTQeoTJtrsB
+    pool:
+      enabled: true
+      min_idle: 5
+      max_total: 20
+      idle_timeout_secs: 60
+      open_timeout_secs: 10    

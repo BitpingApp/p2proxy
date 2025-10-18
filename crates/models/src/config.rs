@@ -25,6 +25,62 @@ pub enum ProxyProtocols {
     Socks5,
 }
 
+/// Pool configuration options for stream pooling
+#[derive(Serialize, Deserialize, Debug, Hash, Eq, PartialEq, PartialOrd, Ord, Clone)]
+pub struct PoolConfigOptions {
+    /// Whether pooling is enabled (defaults to true)
+    #[serde(default = "default_pool_enabled")]
+    pub enabled: bool,
+
+    /// Minimum number of idle streams to maintain per peer
+    #[serde(default = "default_min_idle")]
+    pub min_idle: usize,
+
+    /// Maximum total streams (idle + active) per peer
+    #[serde(default = "default_max_total")]
+    pub max_total: usize,
+
+    /// Maximum idle duration in seconds before recycling
+    #[serde(default = "default_idle_timeout_secs")]
+    pub idle_timeout_secs: u64,
+
+    /// Timeout for opening a new stream in seconds
+    #[serde(default = "default_open_timeout_secs")]
+    pub open_timeout_secs: u64,
+}
+
+impl Default for PoolConfigOptions {
+    fn default() -> Self {
+        Self {
+            enabled: default_pool_enabled(),
+            min_idle: default_min_idle(),
+            max_total: default_max_total(),
+            idle_timeout_secs: default_idle_timeout_secs(),
+            open_timeout_secs: default_open_timeout_secs(),
+        }
+    }
+}
+
+fn default_pool_enabled() -> bool {
+    true
+}
+
+fn default_min_idle() -> usize {
+    5
+}
+
+fn default_max_total() -> usize {
+    20
+}
+
+fn default_idle_timeout_secs() -> u64 {
+    60
+}
+
+fn default_open_timeout_secs() -> u64 {
+    10
+}
+
 #[derive(Serialize, Deserialize, Debug, Hash, Eq, PartialEq, PartialOrd, Ord, Clone)]
 pub struct Server {
     pub protocol: ProxyProtocols,
@@ -32,6 +88,9 @@ pub struct Server {
 
     #[serde(flatten)]
     pub peer_options: ServerPeerOptions,
+
+    #[serde(default)]
+    pub pool: PoolConfigOptions,
 }
 
 #[derive(Serialize, Deserialize, Debug, Hash, Eq, PartialEq, PartialOrd, Ord, Clone)]

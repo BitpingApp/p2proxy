@@ -7,6 +7,7 @@ use color_eyre::eyre::Result;
 use futures::{AsyncReadExt, AsyncWriteExt, Stream};
 use libp2p::{core::SignedEnvelope, identity::Keypair, PeerId, Stream as LibP2pStream};
 use libp2p_stream as p2p_stream;
+use crate::stream_pool::{PoolConfig, StreamPool};
 use metrics::{counter, gauge, histogram};
 use socks5_impl::protocol::{
     handshake, Address, AsyncStreamOperation, AuthMethod, Reply, Request, Response,
@@ -15,6 +16,7 @@ use std::{
     io,
     net::SocketAddr,
     pin::Pin,
+    sync::Arc,
     task::{Context, Poll},
 };
 use tokio::{
@@ -101,13 +103,13 @@ impl Stream for SocksProxyStream {
     }
 }
 
-#[instrument(level = "warn", skip_all, fields(port = server_config.port, peer))]
+#[instrument(level = "warn", skip_all, fields(port = server_config.port))]
 pub async fn create_socks_proxy_stream(
     server_config: &'static Server,
     local_keypair: &'static Keypair,
     token: String,
     peer: PeerId,
-    control: p2p_stream::Control,
+    stream_pool: Arc<StreamPool>,
     sender: mpsc::Sender<SocksStreamMessage>,
 ) -> Result<()> {
     let listener = TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], server_config.port))).await?;
@@ -131,7 +133,7 @@ pub async fn create_socks_proxy_stream(
                         warn!("Failed to set TCP_NODELAY: {}", e);
                     }
 
-                    let connection_control = control.clone();
+                    let connection_pool = stream_pool.clone();
                     let connection_sender = sender.clone();
                     let connection_token = token.clone();
 
@@ -142,7 +144,7 @@ pub async fn create_socks_proxy_stream(
                             local_keypair,
                             connection_token,
                             peer,
-                            connection_control,
+                            connection_pool,
                             connection_sender,
                         )
                         .await;
@@ -174,7 +176,7 @@ async fn handle_socks_connection(
     local_keypair: &'static Keypair,
     token: String,
     mut peer: PeerId,
-    mut control: p2p_stream::Control,
+    stream_pool: Arc<StreamPool>,
     sender: Sender<SocksStreamMessage>,
 ) {
     let session_id = Uuid::new_v4();
@@ -257,57 +259,22 @@ async fn handle_socks_connection(
 
     counter!("p2proxy_socks_connections_established_total").increment(1);
 
-    // Connect to peer
-    let mut retry_count = 0;
-    let max_retries = 5;
-
-    let stream = loop {
-        if retry_count >= max_retries {
+    // Acquire a stream from the pool (pool handles rate limiting and timeouts)
+    let stream = match stream_pool.acquire_stream(peer).await {
+        Ok(s) => s,
+        Err(e) => {
+            counter!("p2proxy_stream_acquire_failed_total").increment(1);
+            warn!("Failed to acquire stream from pool: {}", e);
             let response = Response::new(Reply::GeneralFailure, Address::unspecified());
             let _ = response.write_to_async_stream(&mut socket).await;
+            let _ = sender
+                .send(SocksStreamMessage::Error {
+                    session_id: Some(session_id),
+                    error: format!("Failed to acquire stream: {}", e),
+                    stage: SessionStage::PeerConnection,
+                })
+                .await;
             return;
-        }
-
-        // Try to connect
-        match control.open_stream(peer, TCP_PROXY_PROTOCOL).await {
-            Ok(s) => {
-                break s; // Success, break out of the loop
-            }
-            Err(e) => {
-                // Increment retry counter
-                retry_count += 1;
-
-                // Create oneshot channel for the response
-                let (tx, rx) = oneshot::channel();
-
-                // Request a new peer with the oneshot sender
-                let _ = sender
-                    .send(SocksStreamMessage::RequestNewPeer {
-                        callback: tx,
-                        server_config,
-                    })
-                    .await;
-
-                // Wait for the response
-                match rx.await {
-                    Ok(new_peer) => {
-                        // Update current peer and try again
-                        peer = new_peer;
-                        println!(
-                            "Retry attempt {}/{} with new peer",
-                            retry_count, max_retries
-                        );
-                    }
-                    Err(_) => {
-                        // Oneshot channel was dropped without sending a response
-                        println!(
-                            "Failed to get new peer on attempt {}/{}",
-                            retry_count, max_retries
-                        );
-                        // Continue the loop to retry with the same peer
-                    }
-                }
-            }
         }
     };
 
@@ -518,6 +485,9 @@ async fn handle_socks_connection(
         ?report,
         "Session finished with bandwidth report",
     );
+
+    // Notify pool that stream is closed
+    stream_pool.stream_closed(peer).await;
 
     // Send finished message with report
     let _ = sender
