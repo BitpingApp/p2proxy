@@ -31,6 +31,16 @@ jobs:
           toolchain: stable
           override: true
 
+      - name: Install Protocol Buffers Compiler
+        run: |
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            brew install protobuf
+          elif [[ "$RUNNER_OS" == "Linux" ]]; then
+            sudo apt-get update
+            sudo apt-get install -y protobuf-compiler
+          fi
+        shell: bash
+
       - name: Configure SSH and Cargo for GitLab
         run: |
           mkdir -p ~/.ssh ~/.cargo
@@ -55,7 +65,7 @@ jobs:
       - name: Setup SSH Agent
         uses: webfactory/ssh-agent@v0.9.0
         with:
-          ssh-private-key: ${{ secrets.GITLAB_ACCESS_SSH_PRIVATE_KEY }}
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
       - name: Cache Cargo dependencies
         uses: actions/cache@v4
@@ -105,6 +115,16 @@ jobs:
           toolchain: stable
           override: true
 
+      - name: Install Protocol Buffers Compiler
+        run: |
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            brew install protobuf
+          elif [[ "$RUNNER_OS" == "Linux" ]]; then
+            sudo apt-get update
+            sudo apt-get install -y protobuf-compiler
+          fi
+        shell: bash
+
       - name: Configure SSH and Cargo for GitLab
         run: |
           mkdir -p ~/.ssh ~/.cargo
@@ -129,7 +149,7 @@ jobs:
       - name: Setup SSH Agent
         uses: webfactory/ssh-agent@v0.9.0
         with:
-          ssh-private-key: ${{ secrets.GITLAB_ACCESS_SSH_PRIVATE_KEY }}
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
       - name: Cache Cargo dependencies
         uses: actions/cache@v4

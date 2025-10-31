@@ -8,8 +8,6 @@ use serde::{Deserialize, Serialize};
 
 pub mod config;
 pub mod events;
-mod state;
-pub use state::*;
 
 use tracing::info;
 

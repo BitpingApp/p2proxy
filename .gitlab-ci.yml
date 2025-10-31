@@ -15,10 +15,9 @@ variables:
 .setup_ssh: &setup_ssh
   before_script:
     - |
-      # Install SSH client if not present
-      if ! command -v ssh &> /dev/null; then
-        apt-get update && apt-get install -y openssh-client
-      fi
+      # Install required build dependencies
+      apt-get update
+      apt-get install -y openssh-client protobuf-compiler
 
       # Setup SSH directory and configuration
       mkdir -p ~/.ssh
