@@ -1,0 +1,140 @@
+name: Playwright Proxy Tests
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+  schedule:
+    # Run daily at 2 AM UTC to catch proxy stability issues
+    - cron: '0 2 * * *'
+  workflow_dispatch:  # Allow manual triggering
+
+permissions:
+  contents: read
+
+jobs:
+  playwright-tests:
+    name: Playwright Proxy Tests on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        # Can expand to macos-latest when needed
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-playwright-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-playwright-
+            ${{ runner.os }}-cargo-
+
+      - name: Build p2proxy
+        run: cargo build --release --bin p2proxy
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: tests/playwright/package-lock.json
+
+      - name: Install Playwright dependencies
+        working-directory: tests/playwright
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+
+      - name: Start p2proxy daemon
+        run: |
+          # Create log directory
+          mkdir -p logs
+
+          # Start p2proxy in background
+          ./target/release/p2proxy > logs/p2proxy.log 2>&1 &
+          PROXY_PID=$!
+          echo "PROXY_PID=$PROXY_PID" >> $GITHUB_ENV
+
+          # Wait for proxy to be ready (check if SOCKS5 port is listening)
+          echo "Waiting for proxy to start..."
+          for i in {1..30}; do
+            if nc -z localhost 1080 2>/dev/null; then
+              echo "Proxy is ready!"
+              break
+            fi
+            if [ $i -eq 30 ]; then
+              echo "Proxy failed to start within 30 seconds"
+              cat logs/p2proxy.log
+              exit 1
+            fi
+            sleep 1
+          done
+
+          # Give it a few more seconds to fully initialize
+          sleep 5
+        env:
+          BITPING_API_KEY: ${{ secrets.BITPING_API_KEY }}
+          RUST_LOG: info
+
+      - name: Run Playwright tests
+        working-directory: tests/playwright
+        run: npx playwright test
+        env:
+          CI: true
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-results-${{ matrix.os }}
+          path: |
+            tests/playwright/test-results/
+            tests/playwright/playwright-report/
+          retention-days: 7
+
+      - name: Upload proxy logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: proxy-logs-${{ matrix.os }}
+          path: logs/
+          retention-days: 7
+
+      - name: Stop p2proxy daemon
+        if: always()
+        run: |
+          if [ ! -z "$PROXY_PID" ]; then
+            kill $PROXY_PID || true
+            # Wait for graceful shutdown
+            sleep 2
+            # Force kill if still running
+            kill -9 $PROXY_PID 2>/dev/null || true
+          fi
+
+      - name: Display proxy logs on failure
+        if: failure()
+        run: |
+          echo "=== P2Proxy Logs ==="
+          cat logs/p2proxy.log || echo "No logs found"
