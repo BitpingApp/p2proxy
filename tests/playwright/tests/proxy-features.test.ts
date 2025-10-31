@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { measurePageLoadTime, TIMEOUTS } from './test-utils';
 
 /**
  * Proxy-specific feature tests
@@ -162,15 +163,11 @@ test.describe('Proxy Feature Tests', () => {
   });
 
   test('should measure connection latency', async ({ page }) => {
-    const startTime = Date.now();
+    const loadTime = await measurePageLoadTime(page, 'https://www.wikipedia.org/');
 
-    await page.goto('https://www.wikipedia.org/', { waitUntil: 'domcontentloaded' });
-
-    const loadTime = Date.now() - startTime;
-
-    // Just verify it loaded in a reasonable time
+    // Verify it loaded in a reasonable time
     // (We're not testing performance, just that it works)
-    expect(loadTime).toBeLessThan(60000); // 60 seconds max
+    expect(loadTime).toBeLessThan(TIMEOUTS.MAX_PAGE_LOAD_TIME);
 
     console.log(`Page loaded in ${loadTime}ms`);
   });

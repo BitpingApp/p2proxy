@@ -41,11 +41,16 @@ jobs:
         run: |
           mkdir -p ~/.ssh ~/.cargo
 
-          # Configure SSH to accept GitLab hosts without strict host checking
+          # Add GitLab's SSH host keys for secure verification
+          ssh-keyscan gitlab.com >> ~/.ssh/known_hosts 2>/dev/null
+          chmod 644 ~/.ssh/known_hosts
+
+          # Configure SSH for GitLab
           cat >> ~/.ssh/config << EOF
-          Host *.gitlab.com gitlab.com
-              StrictHostKeyChecking no
-              UserKnownHostsFile /dev/null
+          Host gitlab.com
+              HostName gitlab.com
+              User git
+              IdentityFile ~/.ssh/id_rsa
           EOF
           chmod 600 ~/.ssh/config
 
@@ -77,6 +82,17 @@ jobs:
             ${{ runner.os }}-cargo-playwright-
             ${{ runner.os }}-cargo-
 
+      - name: Validate BITPING_API_KEY
+        run: |
+          if [ -z "$BITPING_API_KEY" ]; then
+            echo "Error: BITPING_API_KEY secret is not set"
+            echo "Please add BITPING_API_KEY to repository secrets"
+            exit 1
+          fi
+          echo "BITPING_API_KEY is configured"
+        env:
+          BITPING_API_KEY: ${{ secrets.BITPING_API_KEY }}
+
       - name: Build p2proxy
         run: cargo build --release --bin p2proxy
 
@@ -106,7 +122,8 @@ jobs:
           # Wait for proxy to be ready (check if SOCKS5 port is listening)
           echo "Waiting for proxy to start..."
           for i in {1..30}; do
-            if nc -z localhost 1080 2>/dev/null; then
+            # Use bash's built-in TCP check (portable, no external dependencies)
+            if timeout 1 bash -c 'cat < /dev/null > /dev/tcp/localhost/1080' 2>/dev/null; then
               echo "Proxy is ready!"
               break
             fi
@@ -115,10 +132,12 @@ jobs:
               cat logs/p2proxy.log
               exit 1
             fi
+            echo "Attempt $i/30: Proxy not ready yet..."
             sleep 1
           done
 
           # Give it a few more seconds to fully initialize
+          echo "Proxy started, waiting for full initialization..."
           sleep 5
         env:
           BITPING_API_KEY: ${{ secrets.BITPING_API_KEY }}

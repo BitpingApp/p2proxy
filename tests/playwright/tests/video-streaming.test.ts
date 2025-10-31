@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { waitForPageReady, safelyInteract, TIMEOUTS } from './test-utils';
 
 /**
  * Video streaming tests through the SOCKS5 proxy
@@ -13,8 +14,8 @@ test.describe('Video Streaming Tests', () => {
     // Verify page loaded
     await expect(page).toHaveTitle(/YouTube/i);
 
-    // Wait for content to load
-    await page.waitForTimeout(3000);
+    // Wait for content to load dynamically
+    await waitForPageReady(page);
 
     // Check for main content
     const hasContent = await page.locator('body').isVisible();
@@ -25,7 +26,7 @@ test.describe('Video Streaming Tests', () => {
     await page.goto('https://www.youtube.com/', { waitUntil: 'domcontentloaded' });
 
     // Wait for page to stabilize
-    await page.waitForTimeout(3000);
+    await waitForPageReady(page);
 
     // Try to find and interact with search box
     // YouTube's HTML structure may vary, so we try multiple selectors
@@ -35,31 +36,36 @@ test.describe('Video Streaming Tests', () => {
       'input[aria-label*="Search"]',
     ];
 
-    let searchBox = null;
+    let searchInteracted = false;
     for (const selector of searchSelectors) {
-      try {
-        searchBox = page.locator(selector).first();
-        if (await searchBox.isVisible({ timeout: 2000 })) {
-          break;
+      searchInteracted = await safelyInteract(
+        page,
+        selector,
+        async (searchBox) => {
+          await searchBox.click();
+          await searchBox.fill('test video');
+          await searchBox.press('Enter');
+
+          // Wait for navigation to search results
+          await page.waitForLoadState('domcontentloaded', {
+            timeout: TIMEOUTS.PAGE_LOAD,
+          });
+        },
+        {
+          timeout: TIMEOUTS.CONTENT_LOAD,
+          fallbackMessage: `Could not find search box with selector: ${selector}`,
         }
-      } catch {
-        continue;
-      }
+      );
+
+      if (searchInteracted) break;
     }
 
-    if (searchBox && await searchBox.isVisible()) {
-      await searchBox.click();
-      await searchBox.fill('test video');
-      await searchBox.press('Enter');
-
-      // Wait for search results
-      await page.waitForTimeout(3000);
-
+    if (searchInteracted) {
       // Verify we're on results page
       expect(page.url()).toContain('search');
     } else {
       // If we can't interact with search, just verify page loaded
-      console.log('Could not find search box, skipping search interaction');
+      console.log('Could not find any search box, skipping search interaction');
       expect(page.url()).toContain('youtube.com');
     }
   });
@@ -68,10 +74,11 @@ test.describe('Video Streaming Tests', () => {
     // Use a stable, public video (YouTube's own channel trailer is usually stable)
     await page.goto('https://www.youtube.com/watch?v=dQw4w9WgXcQ', {
       waitUntil: 'domcontentloaded',
+      timeout: TIMEOUTS.PAGE_LOAD,
     });
 
-    // Wait for page to load
-    await page.waitForTimeout(3000);
+    // Wait for page to load dynamically
+    await waitForPageReady(page);
 
     // Verify we're on a video page
     expect(page.url()).toContain('youtube.com/watch');
@@ -101,8 +108,8 @@ test.describe('Video Streaming Tests', () => {
     // Verify page loaded
     await expect(page).toHaveTitle(/Twitch/i);
 
-    // Wait for content
-    await page.waitForTimeout(3000);
+    // Wait for dynamic content to load
+    await waitForPageReady(page);
 
     // Check for main content
     const hasContent = await page.locator('body').isVisible();
@@ -126,19 +133,29 @@ test.describe('Video Streaming Tests', () => {
       }
     });
 
-    await page.goto('https://www.youtube.com/', { waitUntil: 'networkidle' });
+    await page.goto('https://www.youtube.com/', {
+      waitUntil: 'networkidle',
+      timeout: TIMEOUTS.NETWORK_IDLE,
+    });
 
-    // We may or may not get CDN requests depending on what loads
-    // The important thing is the page loads without errors
+    // Verify page loads without errors
     const hasContent = await page.locator('body').isVisible();
     expect(hasContent).toBeTruthy();
+
+    // Log CDN requests found (optional - may be 0 if no video autoplay)
+    if (cdnResponses.length > 0) {
+      console.log(`Found ${cdnResponses.length} CDN requests`);
+    }
   });
 
   test('should load streaming thumbnails and images', async ({ page }) => {
-    await page.goto('https://www.youtube.com/', { waitUntil: 'domcontentloaded' });
+    await page.goto('https://www.youtube.com/', {
+      waitUntil: 'domcontentloaded',
+      timeout: TIMEOUTS.PAGE_LOAD,
+    });
 
-    // Wait for thumbnails to load
-    await page.waitForTimeout(5000);
+    // Wait for thumbnails to load dynamically
+    await page.waitForLoadState('networkidle', { timeout: TIMEOUTS.NETWORK_IDLE });
 
     // Check for thumbnail images
     const thumbnails = page.locator('img');
@@ -148,7 +165,7 @@ test.describe('Video Streaming Tests', () => {
 
     // Check that at least some thumbnails loaded
     const loadedImages = await thumbnails.evaluateAll((images: HTMLImageElement[]) => {
-      return images.filter(img => img.complete && img.naturalWidth > 0).length;
+      return images.filter((img) => img.complete && img.naturalWidth > 0).length;
     });
 
     expect(loadedImages).toBeGreaterThan(0);

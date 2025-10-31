@@ -25,12 +25,16 @@ variables:
         chmod 600 ~/.ssh/id_rsa
         ssh-add ~/.ssh/id_rsa
       fi
-    # Configure SSH to accept GitLab hosts
+    # Add GitLab's SSH host keys for secure verification
+    - ssh-keyscan gitlab.com >> ~/.ssh/known_hosts 2>/dev/null || true
+    - chmod 644 ~/.ssh/known_hosts
+    # Configure SSH for GitLab
     - |
       cat >> ~/.ssh/config << EOF
-      Host *.gitlab.com gitlab.com
-          StrictHostKeyChecking no
-          UserKnownHostsFile /dev/null
+      Host gitlab.com
+          HostName gitlab.com
+          User git
+          IdentityFile ~/.ssh/id_rsa
       EOF
     - chmod 600 ~/.ssh/config
     # Configure Cargo to use Git CLI
