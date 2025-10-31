@@ -123,11 +123,14 @@ The application supports multiple proxy protocols:
 - `socks.rs`: Standard SOCKS5 server (legacy, commented out)
 - `socks_stream.rs`: Stream-based SOCKS5 for P2P connections (active)
 
-**WireGuard Protocol:**
-- `wireguard.rs`: WireGuard VPN protocol support for P2P connections
-- Listens for WireGuard UDP packets and tunnels them through libp2p streams
-- Supports standard WireGuard message types (handshake initiation, handshake response, cookie reply, data)
-- Includes metrics tracking for packets, bandwidth, and errors
+**WireGuard Protocol (Foundation Layer):**
+- `wireguard.rs`: UDP packet forwarding with session management for WireGuard tunneling
+- ⚠️ **Important**: This is NOT a complete WireGuard implementation - see `WIREGUARD_LIMITATIONS.md`
+- Provides session-managed UDP forwarding through libp2p streams
+- Recognizes WireGuard message types (handshake initiation, handshake response, cookie reply, data)
+- Suitable for tunneling pre-configured WireGuard connections, not standalone VPN
+- Missing: WireGuard cryptography, key management, TUN/TAP interfaces, state machine
+- Includes comprehensive metrics tracking and session lifecycle management
 
 ### Configuration (`Config.yaml`)
 

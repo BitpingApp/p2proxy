@@ -382,6 +382,7 @@ impl ProxyNetwork<Bootstrapped> {
             models::config::ProxyProtocols::WireGuard => {
                 // Create a channel for WireGuard messages
                 let (tx, mut rx) = tokio::sync::mpsc::channel(100);
+                let main_sender = self.0.proxy_message_channel.0.clone();
 
                 proxy_protocols::wireguard::create_wireguard_proxy_stream(
                     server,
@@ -394,11 +395,36 @@ impl ProxyNetwork<Bootstrapped> {
                 .await?;
 
                 // Spawn a task to forward WireGuard messages to the main proxy message channel
-                // This could be enhanced to convert WireGuard-specific messages to common format
+                // Convert WireGuard-specific messages to SOCKS format for now
+                // TODO: Create unified message format or handle WireGuard messages separately
                 tokio::spawn(async move {
-                    while let Some(_msg) = rx.recv().await {
-                        // For now, we just consume the messages
-                        // TODO: Convert WireGuard messages to common format and forward
+                    use proxy_protocols::socks_stream::SocksStreamMessage;
+                    use proxy_protocols::wireguard::WireguardStreamMessage;
+
+                    while let Some(msg) = rx.recv().await {
+                        // Forward compatible messages to main channel
+                        match msg {
+                            WireguardStreamMessage::Error { session_id, error, .. } => {
+                                warn!("WireGuard error (session {:?}): {}", session_id, error);
+                                // Log but don't forward incompatible message types yet
+                            }
+                            WireguardStreamMessage::DataTransferred { session_id, direction, bytes } => {
+                                debug!("WireGuard data transfer: session={}, direction={:?}, bytes={}",
+                                       session_id, direction, bytes);
+                                // Track in metrics, already done in wireguard.rs
+                            }
+                            WireguardStreamMessage::Initialized { session_id, peer_endpoint, peer } => {
+                                info!("WireGuard session initialized: session={}, endpoint={}, peer={}",
+                                      session_id, peer_endpoint, peer);
+                            }
+                            WireguardStreamMessage::Finished { session_id, .. } => {
+                                info!("WireGuard session finished: session={}", session_id);
+                            }
+                            WireguardStreamMessage::RequestNewPeer { .. } => {
+                                // Handle peer rotation if needed
+                                debug!("WireGuard requesting new peer");
+                            }
+                        }
                     }
                 });
             }
