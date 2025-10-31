@@ -9,6 +9,37 @@ stages:
 variables:
   CARGO_HOME: $CI_PROJECT_DIR/.cargo
   RUST_BACKTRACE: "1"
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
+# Setup SSH for accessing private GitLab repositories
+.setup_ssh: &setup_ssh
+  before_script:
+    - 'command -v ssh-agent >/dev/null || ( apt-get update -y && apt-get install openssh-client -y )'
+    - eval $(ssh-agent -s)
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    # Add SSH private key from GitLab CI/CD variables
+    - |
+      if [ -n "$SSH_PRIVATE_KEY" ]; then
+        echo "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/id_rsa
+        chmod 600 ~/.ssh/id_rsa
+        ssh-add ~/.ssh/id_rsa
+      fi
+    # Configure SSH to accept GitLab hosts
+    - |
+      cat >> ~/.ssh/config << EOF
+      Host *.gitlab.com gitlab.com
+          StrictHostKeyChecking no
+          UserKnownHostsFile /dev/null
+      EOF
+    - chmod 600 ~/.ssh/config
+    # Configure Cargo to use Git CLI
+    - mkdir -p ~/.cargo
+    - |
+      cat >> ~/.cargo/config.toml << EOF
+      [net]
+      git-fetch-with-cli = true
+      EOF
 
 # Cache Cargo dependencies for faster builds
 .cache_template: &cache_definition
@@ -28,6 +59,7 @@ test:
   stage: test
   image: rust:latest
   <<: *cache_definition
+  <<: *setup_ssh
   script:
     - rustc --version
     - cargo --version
@@ -44,6 +76,7 @@ test:macos:
   tags:
     - macos
   <<: *cache_definition
+  <<: *setup_ssh
   script:
     - rustc --version
     - cargo --version
@@ -60,6 +93,7 @@ benchmark:compile:
   stage: benchmark
   image: rust:latest
   <<: *cache_definition
+  <<: *setup_ssh
   script:
     - echo "Compiling benchmarks..."
     - cargo bench --no-run
@@ -74,6 +108,7 @@ test:connection:
   stage: test
   image: rust:latest
   <<: *cache_definition
+  <<: *setup_ssh
   script:
     - echo "Running connection tests..."
     - cargo test --test connection_tests --verbose
@@ -87,6 +122,7 @@ test:disconnection:
   stage: test
   image: rust:latest
   <<: *cache_definition
+  <<: *setup_ssh
   script:
     - echo "Running disconnection tests..."
     - cargo test --test disconnection_tests --verbose
@@ -100,6 +136,7 @@ test:throughput:
   stage: test
   image: rust:latest
   <<: *cache_definition
+  <<: *setup_ssh
   script:
     - echo "Running throughput tests..."
     - cargo test --test throughput_tests --verbose
@@ -113,6 +150,7 @@ test:jitter:
   stage: test
   image: rust:latest
   <<: *cache_definition
+  <<: *setup_ssh
   script:
     - echo "Running jitter tests..."
     - cargo test --test jitter_tests --verbose
@@ -126,6 +164,7 @@ test:stability:
   stage: test
   image: rust:latest
   <<: *cache_definition
+  <<: *setup_ssh
   script:
     - echo "Running stability tests (quick)..."
     - cargo test --test stability_tests --verbose
@@ -139,6 +178,7 @@ test:long-running:
   stage: long-running
   image: rust:latest
   <<: *cache_definition
+  <<: *setup_ssh
   timeout: 48h
   script:
     - echo "Running long-running stability tests..."
@@ -156,6 +196,7 @@ lint:
   stage: test
   image: rust:latest
   <<: *cache_definition
+  <<: *setup_ssh
   script:
     - rustup component add clippy rustfmt
     - echo "Running cargo fmt check..."
@@ -173,6 +214,7 @@ build:
   stage: test
   image: rust:latest
   <<: *cache_definition
+  <<: *setup_ssh
   script:
     - echo "Building release binaries..."
     - cargo build --release --all

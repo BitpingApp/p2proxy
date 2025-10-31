@@ -37,6 +37,32 @@ jobs:
           toolchain: stable
           override: true
 
+      - name: Configure SSH and Cargo for GitLab
+        run: |
+          mkdir -p ~/.ssh ~/.cargo
+
+          # Configure SSH to accept GitLab hosts without strict host checking
+          cat >> ~/.ssh/config << EOF
+          Host *.gitlab.com gitlab.com
+              StrictHostKeyChecking no
+              UserKnownHostsFile /dev/null
+          EOF
+          chmod 600 ~/.ssh/config
+
+          # Configure Cargo to use Git CLI for all operations
+          cat >> ~/.cargo/config.toml << EOF
+          [net]
+          git-fetch-with-cli = true
+          EOF
+
+          # Also set environment variable for immediate effect
+          echo "CARGO_NET_GIT_FETCH_WITH_CLI=true" >> $GITHUB_ENV
+
+      - name: Setup SSH Agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
       - name: Cache Cargo dependencies
         uses: actions/cache@v4
         with:
