@@ -119,7 +119,7 @@ pub async fn create_wireguard_proxy_stream(
     stream_pool: Arc<StreamPool>,
     sender: mpsc::Sender<WireguardStreamMessage>,
 ) -> Result<()> {
-    let socket = UdpSocket::bind(SocketAddr::from(([0, 0, 0, 0], server_config.port))).await?;
+    let socket = Arc::new(UdpSocket::bind(SocketAddr::from(([0, 0, 0, 0], server_config.port))).await?);
     counter!("p2proxy_wireguard_server_started_total").increment(1);
     gauge!("p2proxy_wireguard_servers_active").increment(1.0);
     info!("WireGuard proxy listening on UDP port {}", server_config.port);
@@ -170,7 +170,7 @@ pub async fn create_wireguard_proxy_stream(
                     let connection_pool = stream_pool.clone();
                     let connection_sender = sender.clone();
                     let connection_token = token.clone();
-                    let socket_ref = Arc::new(socket.try_clone().expect("Failed to clone socket"));
+                    let socket_ref = socket.clone();
 
                     tokio::spawn(async move {
                         handle_wireguard_packet(
