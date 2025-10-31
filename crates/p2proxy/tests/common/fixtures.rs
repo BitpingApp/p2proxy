@@ -98,6 +98,7 @@ pub fn test_server(port: u16, protocol: ProxyProtocols) -> Server {
             country: None,
             min_bandwidth: Bandwidth::from_mbps(50),
         },
+        pool: Default::default(),
     }
 }
 
@@ -127,6 +128,7 @@ pub fn test_server_with_country(port: u16, protocol: ProxyProtocols, country: &s
             country: Some(country.to_string()),
             min_bandwidth: Bandwidth::from_mbps(50),
         },
+        pool: Default::default(),
     }
 }
 
@@ -155,6 +157,7 @@ pub fn test_server_with_bandwidth(port: u16, protocol: ProxyProtocols, min_bandw
             country: None,
             min_bandwidth: Bandwidth::from_mbps(min_bandwidth_mbps),
         },
+        pool: Default::default(),
     }
 }
 

@@ -31,6 +31,7 @@ tests/
 ├── throughput_tests.rs          # Bandwidth and performance tests
 ├── jitter_tests.rs              # Latency and jitter analysis
 ├── stability_tests.rs           # Long-running stability tests
+├── wireguard_tests.rs           # WireGuard protocol tests
 ├── fixtures_test.rs             # Tests for fixture utilities
 ├── test_utils_test.rs           # Tests for test utilities
 └── example_usage.rs             # Example test patterns
@@ -93,6 +94,17 @@ cargo test --test stability_tests
 
 # Run long-running stability tests (can take hours)
 cargo test --test stability_tests -- --ignored --nocapture
+```
+
+#### WireGuard Protocol Tests
+Test WireGuard VPN protocol functionality:
+```bash
+cargo test --test wireguard_tests
+```
+
+With detailed output:
+```bash
+cargo test --test wireguard_tests -- --nocapture
 ```
 
 ### Running Individual Tests
@@ -318,6 +330,42 @@ Tests covering long-term stability and reliability (many marked with `#[ignore]`
 - Memory growth <10% over 24 hours
 - CPU usage <5% when idle
 - Automatic recovery from failures
+
+### WireGuard Protocol Tests (`wireguard_tests.rs`)
+
+Tests covering WireGuard VPN protocol functionality:
+
+- **Packet Reception**
+  - UDP socket binding and listening
+  - WireGuard packet reception
+  - Empty packet handling
+  - Large packet support (up to MTU)
+
+- **Message Type Identification**
+  - Handshake initiation packets (148 bytes)
+  - Handshake response packets (92 bytes)
+  - Cookie reply packets (64 bytes)
+  - Data packets (variable length)
+  - Unknown message type handling
+
+- **Concurrent Operation**
+  - Multiple concurrent packet processing
+  - Stream pool integration
+  - Message type mixing in sequence
+  - High packet rate handling
+
+- **Configuration**
+  - Custom port binding
+  - Bandwidth requirements
+  - Country filtering
+  - Mixed protocol configurations (SOCKS5 + WireGuard)
+
+**Key Validations**:
+- All WireGuard message types correctly identified
+- Packets forwarded through libp2p streams
+- Concurrent packets processed without interference
+- Configuration options respected
+- Metrics properly tracked
 
 ## Expected Durations
 

@@ -194,4 +194,38 @@ mod examples {
         // This demonstrates a complete test setup
         assert!(data.len() > 0);
     }
+
+    /// Example: Creating a WireGuard VPN configuration
+    #[test]
+    fn example_wireguard_config() {
+        // Create a WireGuard server on port 51820 (standard WireGuard port)
+        let wg_server = test_server(51820, ProxyProtocols::WireGuard);
+
+        let config = test_config(vec![wg_server]);
+
+        // Verify the configuration
+        assert_eq!(config.servers.len(), 1);
+        assert_eq!(config.servers[0].port, 51820);
+        assert_eq!(config.servers[0].protocol, ProxyProtocols::WireGuard);
+    }
+
+    /// Example: Mixed protocol configuration
+    #[test]
+    fn example_mixed_protocols() {
+        let servers = vec![
+            // SOCKS5 proxy on standard port
+            test_server(1080, ProxyProtocols::Socks5),
+            // WireGuard VPN on standard port
+            test_server(51820, ProxyProtocols::WireGuard),
+            // High-bandwidth WireGuard server
+            test_server_with_bandwidth(51821, ProxyProtocols::WireGuard, 100),
+        ];
+
+        let config = test_config(servers);
+
+        assert_eq!(config.servers.len(), 3);
+        assert_eq!(config.servers[0].protocol, ProxyProtocols::Socks5);
+        assert_eq!(config.servers[1].protocol, ProxyProtocols::WireGuard);
+        assert_eq!(config.servers[2].protocol, ProxyProtocols::WireGuard);
+    }
 }
