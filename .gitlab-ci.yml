@@ -10,6 +10,12 @@ variables:
   CARGO_HOME: $CI_PROJECT_DIR/.cargo
   RUST_BACKTRACE: "1"
 
+# Install required build dependencies
+.dependencies_template: &install_dependencies
+  before_script:
+    - apt-get update
+    - apt-get install -y protobuf-compiler
+
 # Cache Cargo dependencies for faster builds
 .cache_template: &cache_definition
   cache:
@@ -27,6 +33,7 @@ variables:
 test:
   stage: test
   image: rust:latest
+  <<: *install_dependencies
   <<: *cache_definition
   script:
     - rustc --version
@@ -59,6 +66,7 @@ test:macos:
 benchmark:compile:
   stage: benchmark
   image: rust:latest
+  <<: *install_dependencies
   <<: *cache_definition
   script:
     - echo "Compiling benchmarks..."
@@ -73,6 +81,7 @@ benchmark:compile:
 test:connection:
   stage: test
   image: rust:latest
+  <<: *install_dependencies
   <<: *cache_definition
   script:
     - echo "Running connection tests..."
@@ -86,6 +95,7 @@ test:connection:
 test:disconnection:
   stage: test
   image: rust:latest
+  <<: *install_dependencies
   <<: *cache_definition
   script:
     - echo "Running disconnection tests..."
@@ -99,6 +109,7 @@ test:disconnection:
 test:throughput:
   stage: test
   image: rust:latest
+  <<: *install_dependencies
   <<: *cache_definition
   script:
     - echo "Running throughput tests..."
@@ -112,6 +123,7 @@ test:throughput:
 test:jitter:
   stage: test
   image: rust:latest
+  <<: *install_dependencies
   <<: *cache_definition
   script:
     - echo "Running jitter tests..."
@@ -125,6 +137,7 @@ test:jitter:
 test:stability:
   stage: test
   image: rust:latest
+  <<: *install_dependencies
   <<: *cache_definition
   script:
     - echo "Running stability tests (quick)..."
@@ -138,6 +151,7 @@ test:stability:
 test:long-running:
   stage: long-running
   image: rust:latest
+  <<: *install_dependencies
   <<: *cache_definition
   timeout: 48h
   script:
@@ -155,6 +169,7 @@ test:long-running:
 lint:
   stage: test
   image: rust:latest
+  <<: *install_dependencies
   <<: *cache_definition
   script:
     - rustup component add clippy rustfmt
@@ -172,6 +187,7 @@ lint:
 build:
   stage: test
   image: rust:latest
+  <<: *install_dependencies
   <<: *cache_definition
   script:
     - echo "Building release binaries..."

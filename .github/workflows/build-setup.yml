@@ -25,7 +25,7 @@
     sudo apt-get update
     sudo apt-get update
     # Install latest GCC (currently GCC 13)
-    sudo apt-get install -y cmake gcc g++
+    sudo apt-get install -y cmake gcc g++ protobuf-compiler
 
 - name: Rust Cache
   uses: Swatinem/rust-cache@v2
