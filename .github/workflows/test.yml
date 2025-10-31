@@ -31,6 +31,32 @@ jobs:
           toolchain: stable
           override: true
 
+      - name: Configure SSH and Cargo for GitLab
+        run: |
+          mkdir -p ~/.ssh ~/.cargo
+
+          # Configure SSH to accept GitLab hosts without strict host checking
+          cat >> ~/.ssh/config << EOF
+          Host *.gitlab.com gitlab.com
+              StrictHostKeyChecking no
+              UserKnownHostsFile /dev/null
+          EOF
+          chmod 600 ~/.ssh/config
+
+          # Configure Cargo to use Git CLI for all operations
+          cat >> ~/.cargo/config.toml << EOF
+          [net]
+          git-fetch-with-cli = true
+          EOF
+
+          # Also set environment variable for immediate effect
+          echo "CARGO_NET_GIT_FETCH_WITH_CLI=true" >> $GITHUB_ENV
+
+      - name: Setup SSH Agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.GITLAB_ACCESS_SSH_PRIVATE_KEY }}
+
       - name: Cache Cargo dependencies
         uses: actions/cache@v4
         with:
@@ -44,8 +70,13 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
       - name: Run tests
-        run: cargo test --all --verbose
+        run: cargo nextest run --all --verbose
         env:
           RUST_BACKTRACE: 1
 
@@ -74,6 +105,32 @@ jobs:
           toolchain: stable
           override: true
 
+      - name: Configure SSH and Cargo for GitLab
+        run: |
+          mkdir -p ~/.ssh ~/.cargo
+
+          # Configure SSH to accept GitLab hosts without strict host checking
+          cat >> ~/.ssh/config << EOF
+          Host *.gitlab.com gitlab.com
+              StrictHostKeyChecking no
+              UserKnownHostsFile /dev/null
+          EOF
+          chmod 600 ~/.ssh/config
+
+          # Configure Cargo to use Git CLI for all operations
+          cat >> ~/.cargo/config.toml << EOF
+          [net]
+          git-fetch-with-cli = true
+          EOF
+
+          # Also set environment variable for immediate effect
+          echo "CARGO_NET_GIT_FETCH_WITH_CLI=true" >> $GITHUB_ENV
+
+      - name: Setup SSH Agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.GITLAB_ACCESS_SSH_PRIVATE_KEY }}
+
       - name: Cache Cargo dependencies
         uses: actions/cache@v4
         with:
@@ -88,8 +145,13 @@ jobs:
             ${{ runner.os }}-cargo-long-tests-
             ${{ runner.os }}-cargo-
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
       - name: Run long-running tests
-        run: cargo test --all -- --ignored --nocapture
+        run: cargo nextest run --all --verbose --run-ignored ignored-only
         env:
           RUST_BACKTRACE: 1
         timeout-minutes: 180
