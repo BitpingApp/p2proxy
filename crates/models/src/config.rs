@@ -26,7 +26,7 @@ pub enum ProxyProtocols {
 }
 
 /// Pool configuration options for stream pooling
-#[derive(Serialize, Deserialize, Debug, Hash, Eq, PartialEq, PartialOrd, Ord, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PoolConfigOptions {
     /// Whether pooling is enabled (defaults to true)
     #[serde(default = "default_pool_enabled")]
@@ -47,6 +47,68 @@ pub struct PoolConfigOptions {
     /// Timeout for opening a new stream in seconds
     #[serde(default = "default_open_timeout_secs")]
     pub open_timeout_secs: u64,
+
+    /// Number of retry attempts for failed requests
+    #[serde(default = "default_max_retries")]
+    pub max_retries: u32,
+
+    /// Timeout for peer health checks in seconds
+    #[serde(default = "default_health_check_timeout_secs")]
+    pub health_check_timeout_secs: u64,
+
+    /// Maximum error rate before triggering failover (0.0-1.0)
+    #[serde(default = "default_max_error_rate")]
+    pub max_error_rate: f64,
+}
+
+// Manual implementations of Hash, Eq, PartialEq, Ord, PartialOrd for PoolConfigOptions
+// f64 doesn't implement these traits, so we convert to bits for hashing/comparison
+impl std::hash::Hash for PoolConfigOptions {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.enabled.hash(state);
+        self.min_idle.hash(state);
+        self.max_total.hash(state);
+        self.idle_timeout_secs.hash(state);
+        self.open_timeout_secs.hash(state);
+        self.max_retries.hash(state);
+        self.health_check_timeout_secs.hash(state);
+        self.max_error_rate.to_bits().hash(state); // Convert f64 to u64 for hashing
+    }
+}
+
+impl PartialEq for PoolConfigOptions {
+    fn eq(&self, other: &Self) -> bool {
+        self.enabled == other.enabled
+            && self.min_idle == other.min_idle
+            && self.max_total == other.max_total
+            && self.idle_timeout_secs == other.idle_timeout_secs
+            && self.open_timeout_secs == other.open_timeout_secs
+            && self.max_retries == other.max_retries
+            && self.health_check_timeout_secs == other.health_check_timeout_secs
+            && self.max_error_rate.to_bits() == other.max_error_rate.to_bits()
+    }
+}
+
+impl Eq for PoolConfigOptions {}
+
+impl PartialOrd for PoolConfigOptions {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for PoolConfigOptions {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.enabled
+            .cmp(&other.enabled)
+            .then_with(|| self.min_idle.cmp(&other.min_idle))
+            .then_with(|| self.max_total.cmp(&other.max_total))
+            .then_with(|| self.idle_timeout_secs.cmp(&other.idle_timeout_secs))
+            .then_with(|| self.open_timeout_secs.cmp(&other.open_timeout_secs))
+            .then_with(|| self.max_retries.cmp(&other.max_retries))
+            .then_with(|| self.health_check_timeout_secs.cmp(&other.health_check_timeout_secs))
+            .then_with(|| self.max_error_rate.to_bits().cmp(&other.max_error_rate.to_bits()))
+    }
 }
 
 impl Default for PoolConfigOptions {
@@ -57,6 +119,9 @@ impl Default for PoolConfigOptions {
             max_total: default_max_total(),
             idle_timeout_secs: default_idle_timeout_secs(),
             open_timeout_secs: default_open_timeout_secs(),
+            max_retries: default_max_retries(),
+            health_check_timeout_secs: default_health_check_timeout_secs(),
+            max_error_rate: default_max_error_rate(),
         }
     }
 }
@@ -70,7 +135,7 @@ fn default_min_idle() -> usize {
 }
 
 fn default_max_total() -> usize {
-    20
+    30
 }
 
 fn default_idle_timeout_secs() -> u64 {
@@ -78,7 +143,19 @@ fn default_idle_timeout_secs() -> u64 {
 }
 
 fn default_open_timeout_secs() -> u64 {
-    10
+    20
+}
+
+fn default_max_retries() -> u32 {
+    3
+}
+
+fn default_health_check_timeout_secs() -> u64 {
+    5
+}
+
+fn default_max_error_rate() -> f64 {
+    0.15
 }
 
 #[derive(Serialize, Deserialize, Debug, Hash, Eq, PartialEq, PartialOrd, Ord, Clone)]
