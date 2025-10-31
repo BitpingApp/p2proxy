@@ -117,9 +117,17 @@ The swarm authenticates with the Bitping gRPC service (`grpc.bitping.com`) befor
 
 ### Proxy Protocols (`p2proxy/src/proxy_protocols/`)
 
-Currently implements SOCKS5 proxy protocol with two implementations:
-- `socks.rs`: Standard SOCKS5 server
-- `socks_stream.rs`: Stream-based SOCKS5 for P2P connections
+The application supports multiple proxy protocols:
+
+**SOCKS5 Protocol:**
+- `socks.rs`: Standard SOCKS5 server (legacy, commented out)
+- `socks_stream.rs`: Stream-based SOCKS5 for P2P connections (active)
+
+**WireGuard Protocol:**
+- `wireguard.rs`: WireGuard VPN protocol support for P2P connections
+- Listens for WireGuard UDP packets and tunnels them through libp2p streams
+- Supports standard WireGuard message types (handshake initiation, handshake response, cookie reply, data)
+- Includes metrics tracking for packets, bandwidth, and errors
 
 ### Configuration (`Config.yaml`)
 

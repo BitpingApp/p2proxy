@@ -23,6 +23,7 @@ pub struct Config {
 #[derive(Serialize, Deserialize, Debug, Hash, Eq, PartialEq, PartialOrd, Ord, Clone)]
 pub enum ProxyProtocols {
     Socks5,
+    WireGuard,
 }
 
 /// Pool configuration options for stream pooling

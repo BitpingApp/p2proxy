@@ -366,15 +366,43 @@ impl ProxyNetwork<Bootstrapped> {
             "Connection established with destination peer"
         );
 
-        proxy_protocols::socks_stream::create_socks_proxy_stream(
-            server,
-            &KEYPAIR,
-            self.0.token.to_string(),
-            destination_peer_id,
-            self.0.stream_pool.clone(),
-            self.0.proxy_message_channel.0.clone(),
-        )
-        .await?;
+        // Dispatch to the appropriate protocol handler based on configuration
+        match &server.protocol {
+            models::config::ProxyProtocols::Socks5 => {
+                proxy_protocols::socks_stream::create_socks_proxy_stream(
+                    server,
+                    &KEYPAIR,
+                    self.0.token.to_string(),
+                    destination_peer_id,
+                    self.0.stream_pool.clone(),
+                    self.0.proxy_message_channel.0.clone(),
+                )
+                .await?;
+            }
+            models::config::ProxyProtocols::WireGuard => {
+                // Create a channel for WireGuard messages
+                let (tx, mut rx) = tokio::sync::mpsc::channel(100);
+
+                proxy_protocols::wireguard::create_wireguard_proxy_stream(
+                    server,
+                    &KEYPAIR,
+                    self.0.token.to_string(),
+                    destination_peer_id,
+                    self.0.stream_pool.clone(),
+                    tx,
+                )
+                .await?;
+
+                // Spawn a task to forward WireGuard messages to the main proxy message channel
+                // This could be enhanced to convert WireGuard-specific messages to common format
+                tokio::spawn(async move {
+                    while let Some(_msg) = rx.recv().await {
+                        // For now, we just consume the messages
+                        // TODO: Convert WireGuard messages to common format and forward
+                    }
+                });
+            }
+        }
 
         Ok(())
     }

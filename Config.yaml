@@ -18,4 +18,18 @@ servers:
       open_timeout_secs: 20   # Doubled from 10 for P2P network latency
       max_retries: 3          # New: Number of retries for failed requests
       health_check_timeout_secs: 5  # New: Timeout for peer health checks
-      max_error_rate: 0.15    # New: Failover threshold (15% error rate)    
+      max_error_rate: 0.15    # New: Failover threshold (15% error rate)
+
+  # WireGuard VPN Server (Example - uncomment to enable)
+  # - protocol: WireGuard
+  #   port: 51820
+  #   min_bandwidth: 100Mbps
+  #   pool:
+  #     enabled: true
+  #     min_idle: 3
+  #     max_total: 20
+  #     idle_timeout_secs: 120
+  #     open_timeout_secs: 30
+  #     max_retries: 3
+  #     health_check_timeout_secs: 5
+  #     max_error_rate: 0.15    

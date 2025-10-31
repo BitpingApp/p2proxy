@@ -187,6 +187,7 @@ impl Counter for ServerContainer {
             result.push(ServerStateInfo {
                 server_id: format!("{}:{}", match &server.protocol {
                     config::ProxyProtocols::Socks5 => "socks5",
+                    config::ProxyProtocols::WireGuard => "wireguard",
                 }, server.port),
                 protocol: format!("{:?}", &server.protocol),
                 port: server.port,
