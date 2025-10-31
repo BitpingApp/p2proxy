@@ -15,7 +15,6 @@ use std::future::Future;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::time::timeout;
 
 /// Measurement of bandwidth usage during an operation
 ///

@@ -16,12 +16,8 @@ use tokio::time::{sleep, timeout};
 mod common;
 use common::{MockSwarm, MockSwarmConfig, MockSwarmEvent};
 use common::mock_swarm::MockConnectionError;
-use common::mock_peer::{MockPeer, MockPeerConfig};
-use common::mock_relay::{MockRelay, MockRelayConfig};
-use common::{test_config, test_keypair, test_server};
+use common::{MockPeer, MockPeerConfig, MockRelay, MockRelayConfig};
 use libp2p::PeerId;
-use models::config::ProxyProtocols;
-use models::events::{ConnectionEvents, Events, SessionEvents};
 
 // ============================================================================
 // GRACEFUL DISCONNECTION TESTS

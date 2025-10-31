@@ -1,7 +1,6 @@
 use std::{
     borrow::Cow,
-    fmt::{write, Display},
-    sync::Arc,
+    fmt::Display,
 };
 
 use color_eyre::eyre;
@@ -10,7 +9,7 @@ use figment::{
     Figment,
 };
 use human_bandwidth::re::bandwidth::Bandwidth;
-use libp2p::{Multiaddr, PeerId};
+use libp2p::Multiaddr;
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize, Debug)]
