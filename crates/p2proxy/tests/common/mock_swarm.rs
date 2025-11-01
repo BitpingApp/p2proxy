@@ -304,8 +304,8 @@ impl MockSwarm {
             return Err(MockConnectionError::ConnectionRefused);
         }
 
-        // Simulate connection establishment latency
-        sleep(self.config.latency * 2).await;
+        // Simulate connection establishment latency (reduced from 2x to 1x for faster tests)
+        sleep(self.config.latency).await;
 
         // Check if connection should succeed
         if !self.should_succeed() {

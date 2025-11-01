@@ -39,6 +39,7 @@ pub mod mock_relay;
 pub mod mock_peer;
 pub mod fixtures;
 pub mod test_utils;
+pub mod platform;
 
 // Re-export commonly used types
 pub use mock_swarm::{MockSwarm, MockSwarmConfig, MockSwarmEvent};
@@ -46,3 +47,4 @@ pub use mock_relay::{MockRelay, MockRelayConfig};
 pub use mock_peer::{MockPeer, MockPeerConfig};
 pub use fixtures::*;
 pub use test_utils::*;
+pub use platform::*;

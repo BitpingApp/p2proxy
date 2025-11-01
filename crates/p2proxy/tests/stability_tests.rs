@@ -64,6 +64,7 @@ use rand::Rng;
 mod common;
 use common::{MockSwarm, MockSwarmConfig, MockSwarmEvent};
 use common::mock_swarm::MockConnectionError;
+use common::platform::*;
 
 // ============================================================================
 // RECONNECTION LOGIC TESTS
@@ -79,7 +80,7 @@ async fn test_exponential_backoff() {
     let config = MockSwarmConfig {
         success_rate: 0.0, // All connections fail
         seed: Some(42),
-        latency: Duration::from_millis(10),
+        latency: platform_latency(10),
         ..Default::default()
     };
 
@@ -165,7 +166,7 @@ async fn test_session_restoration() {
     let config = MockSwarmConfig {
         success_rate: 1.0,
         seed: Some(123),
-        latency: Duration::from_millis(10),
+        latency: platform_latency(10),
         ..Default::default()
     };
 
@@ -229,7 +230,7 @@ async fn test_peer_rotation_failover() {
     let config = MockSwarmConfig {
         success_rate: 1.0,
         seed: Some(456),
-        latency: Duration::from_millis(10),
+        latency: platform_latency(10),
         ..Default::default()
     };
 
@@ -301,7 +302,7 @@ async fn test_connection_churn() {
     let config = MockSwarmConfig {
         success_rate: 1.0,
         seed: Some(789),
-        latency: Duration::from_millis(1), // Minimal latency for speed
+        latency: platform_latency(1), // Minimal latency for speed
         max_connections: 150,
         ..Default::default()
     };
@@ -595,7 +596,7 @@ async fn test_concurrent_connections() {
     let config = MockSwarmConfig {
         success_rate: 1.0,
         seed: Some(987),
-        latency: Duration::from_millis(5),
+        latency: platform_latency(5),
         max_connections: 100,
         ..Default::default()
     };
@@ -673,7 +674,7 @@ async fn test_mixed_success_failure() {
     let config = MockSwarmConfig {
         success_rate: 0.7, // 70% success rate
         seed: Some(555),
-        latency: Duration::from_millis(5),
+        latency: platform_latency(5),
         max_connections: 100,
         ..Default::default()
     };
@@ -765,7 +766,7 @@ async fn test_packet_loss_resilience() {
             packet_loss_rate,
             success_rate: 0.9, // 90% base success rate
             seed: Some(42),
-            latency: Duration::from_millis(10),
+            latency: platform_latency(10),
             max_connections: 50,
             ..Default::default()
         };
@@ -849,7 +850,7 @@ async fn test_latency_variance_handling() {
     use common::{MockPeer, MockPeerConfig};
 
     let config = MockPeerConfig {
-        latency: Duration::from_millis(50), // Base latency
+        latency: platform_latency(50), // Base latency
         jitter: Duration::from_millis(200), // ±200ms variance
         failure_rate: 0.0,
         seed: Some(42),
@@ -957,7 +958,7 @@ async fn test_bandwidth_throttling() {
 
         let config = MockPeerConfig {
             bandwidth,
-            latency: Duration::from_millis(10),
+            latency: platform_latency(10),
             failure_rate: 0.0,
             seed: Some(42),
             ..Default::default()
@@ -1104,7 +1105,7 @@ async fn test_chaos_under_load() {
     let config = MockSwarmConfig {
         packet_loss_rate: 0.10,  // 10% packet loss
         success_rate: 0.85,       // 85% success rate (simulates intermittent failures)
-        latency: Duration::from_millis(50), // Base latency
+        latency: platform_latency(50), // Base latency
         seed: Some(42),
         max_connections: 100,
         ..Default::default()
@@ -1427,7 +1428,7 @@ async fn test_24hour_stability() {
     let config = MockSwarmConfig {
         success_rate: 1.0,
         seed: Some(24240),
-        latency: Duration::from_millis(10),
+        latency: platform_latency(10),
         max_connections: 10,
         ..Default::default()
     };
@@ -1571,7 +1572,7 @@ async fn test_longrunning_transfer() {
     let config = MockSwarmConfig {
         success_rate: 1.0,
         seed: Some(60606),
-        latency: Duration::from_millis(10),
+        latency: platform_latency(10),
         max_connections: 10,
         ..Default::default()
     };
@@ -1739,7 +1740,7 @@ async fn test_idle_connection() {
     let config = MockSwarmConfig {
         success_rate: 1.0,
         seed: Some(12012),
-        latency: Duration::from_millis(10),
+        latency: platform_latency(10),
         max_connections: 10,
         ..Default::default()
     };

@@ -25,6 +25,7 @@ use common::{
     mock_peer::{MockPeer, MockPeerConfig},
     mock_relay::{MockRelay, MockRelayConfig},
     mock_swarm::{MockSwarm, MockSwarmConfig, MockSwarmEvent},
+    platform::*,
     test_utils::*,
 };
 
@@ -47,7 +48,7 @@ async fn test_p2p_direct_connection() {
         success_rate: 1.0,
         seed: Some(42),
         use_relay: false,
-        latency: Duration::from_millis(10),
+        latency: platform_latency(10),
         ..Default::default()
     };
 
@@ -107,7 +108,7 @@ async fn test_p2p_relay_connection() {
     let relay_config = MockRelayConfig {
         success_rate: 1.0,
         seed: Some(100),
-        latency: Duration::from_millis(20),
+        latency: platform_latency(20),
         ..Default::default()
     };
     let mut relay = MockRelay::new(relay_config);
@@ -117,7 +118,7 @@ async fn test_p2p_relay_connection() {
         success_rate: 1.0,
         seed: Some(200),
         use_relay: true,
-        latency: Duration::from_millis(10),
+        latency: platform_latency(10),
         ..Default::default()
     };
 
@@ -172,7 +173,7 @@ async fn test_p2p_multiple_peers() {
         success_rate: 1.0,
         seed: Some(300),
         max_connections: 10,
-        latency: Duration::from_millis(5),
+        latency: platform_latency(5),
         ..Default::default()
     };
 
@@ -224,7 +225,7 @@ async fn test_p2p_reconnection() {
     let config = MockSwarmConfig {
         success_rate: 1.0,
         seed: Some(400),
-        latency: Duration::from_millis(10),
+        latency: platform_latency(10),
         ..Default::default()
     };
 
@@ -304,7 +305,7 @@ async fn test_socks5_handshake_noauth() {
     });
 
     // Give server time to start
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::sleep(platform_sleep(10)).await;
 
     // Test client handshake
     let mut client = TcpStream::connect(format!("127.0.0.1:{}", port))
@@ -350,7 +351,7 @@ async fn test_socks5_connect_ipv4() {
         socket.write_all(&[0x00, 0x50]).await.unwrap(); // Bind port (80)
     });
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::sleep(Duration::from_millis(10)).await;
 
     // Test client connection
     let target_addr = Address::SocketAddress(std::net::SocketAddr::from(([1, 2, 3, 4], 80)));
@@ -402,7 +403,7 @@ async fn test_socks5_connect_ipv6() {
         socket.write_all(&[0x00, 0x50]).await.unwrap(); // Port
     });
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::sleep(Duration::from_millis(10)).await;
 
     // Test client connection with IPv6
     let target_addr = Address::SocketAddress(std::net::SocketAddr::from((
@@ -462,7 +463,7 @@ async fn test_socks5_connect_domain() {
         socket.write_all(&[0x00, 0x50]).await.unwrap(); // Bind port
     });
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::sleep(Duration::from_millis(10)).await;
 
     // Test client connection with domain
     let target_addr = Address::DomainAddress("example.com".to_string(), 80);
@@ -519,7 +520,7 @@ async fn test_socks5_session_lifecycle() {
         }
     });
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::sleep(Duration::from_millis(10)).await;
 
     // Client session
     let target = Address::DomainAddress("example.com".to_string(), 80);
@@ -588,7 +589,7 @@ async fn test_socks5_concurrent_sessions() {
         }
     });
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::sleep(Duration::from_millis(10)).await;
 
     // Create 10 concurrent client sessions
     let mut client_handles = vec![];
@@ -651,7 +652,7 @@ async fn test_rpc_connection() {
         socket.write_all(b"OK!!").await.unwrap();
     });
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::sleep(Duration::from_millis(10)).await;
 
     // RPC client connection
     let mut client = TcpStream::connect(format!("127.0.0.1:{}", rpc_port))
