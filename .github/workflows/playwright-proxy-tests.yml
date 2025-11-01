@@ -1,0 +1,204 @@
+name: Playwright Proxy Tests
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+  schedule:
+    # Run daily at 2 AM UTC to catch proxy stability issues
+    - cron: '0 2 * * *'
+  workflow_dispatch:  # Allow manual triggering
+
+permissions:
+  contents: read
+
+jobs:
+  playwright-tests:
+    name: Playwright Proxy Tests on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        # Can expand to macos-latest when needed
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+
+      - name: Configure SSH and Cargo for GitLab
+        run: |
+          mkdir -p ~/.ssh ~/.cargo
+
+          # Add GitLab's SSH host keys for secure verification
+          ssh-keyscan gitlab.com >> ~/.ssh/known_hosts 2>/dev/null
+          chmod 644 ~/.ssh/known_hosts
+
+          # Configure SSH for GitLab
+          cat >> ~/.ssh/config << EOF
+          Host gitlab.com
+              HostName gitlab.com
+              User git
+              IdentityFile ~/.ssh/id_rsa
+          EOF
+          chmod 600 ~/.ssh/config
+
+          # Configure Cargo to use Git CLI for all operations
+          cat >> ~/.cargo/config.toml << EOF
+          [net]
+          git-fetch-with-cli = true
+          EOF
+
+          # Also set environment variable for immediate effect
+          echo "CARGO_NET_GIT_FETCH_WITH_CLI=true" >> $GITHUB_ENV
+
+      - name: Setup SSH Agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Validate BITPING_API_KEY
+        run: |
+          if [ -z "$BITPING_API_KEY" ]; then
+            echo "Error: BITPING_API_KEY secret is not set"
+            echo "Please add BITPING_API_KEY to repository secrets"
+            exit 1
+          fi
+          echo "BITPING_API_KEY is configured"
+        env:
+          BITPING_API_KEY: ${{ secrets.BITPING_API_KEY }}
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-playwright-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-playwright-
+            ${{ runner.os }}-cargo-
+
+      - name: Build p2proxy
+        run: cargo build --release --bin p2proxy
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: tests/playwright/package-lock.json
+
+      - name: Install Playwright dependencies
+        working-directory: tests/playwright
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+
+      - name: Start p2proxy daemon
+        run: |
+          # Create log directory
+          mkdir -p logs
+
+          # Start p2proxy in background
+          ./target/release/p2proxy > logs/p2proxy.log 2>&1 &
+          PROXY_PID=$!
+          echo "PROXY_PID=$PROXY_PID" >> $GITHUB_ENV
+
+          # Wait for proxy to be fully initialized
+          echo "Waiting for proxy to start and authenticate..."
+          PROXY_READY=false
+
+          for i in {1..60}; do
+            # Check if SOCKS5 port is listening
+            if timeout 1 bash -c 'cat < /dev/null > /dev/tcp/localhost/1080' 2>/dev/null; then
+              echo "Port 1080 is listening"
+
+              # Check logs for successful authentication or ready state
+              if grep -q "Authenticated\|Connected to peer\|Server listening\|Ready" logs/p2proxy.log 2>/dev/null; then
+                echo "Proxy is fully initialized and ready!"
+                PROXY_READY=true
+                break
+              else
+                echo "Port is open but waiting for authentication/peer connection..."
+              fi
+            else
+              echo "Attempt $i/60: Port 1080 not yet listening..."
+            fi
+
+            # Check for fatal errors in logs
+            if grep -qi "error.*fatal\|panic\|failed to authenticate" logs/p2proxy.log 2>/dev/null; then
+              echo "Fatal error detected in proxy logs:"
+              cat logs/p2proxy.log
+              exit 1
+            fi
+
+            sleep 1
+          done
+
+          if [ "$PROXY_READY" != "true" ]; then
+            echo "Proxy failed to fully initialize within 60 seconds"
+            echo "=== Proxy Logs ==="
+            cat logs/p2proxy.log
+            exit 1
+          fi
+
+          echo "Proxy is ready for testing"
+        env:
+          BITPING_API_KEY: ${{ secrets.BITPING_API_KEY }}
+          RUST_LOG: info
+
+      - name: Run Playwright tests
+        working-directory: tests/playwright
+        run: npx playwright test
+        env:
+          CI: true
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-results-${{ matrix.os }}
+          path: |
+            tests/playwright/test-results/
+            tests/playwright/playwright-report/
+          retention-days: 7
+
+      - name: Upload proxy logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: proxy-logs-${{ matrix.os }}
+          path: logs/
+          retention-days: 7
+
+      - name: Stop p2proxy daemon
+        if: always()
+        run: |
+          if [ ! -z "$PROXY_PID" ]; then
+            kill $PROXY_PID || true
+            # Wait for graceful shutdown
+            sleep 2
+            # Force kill if still running
+            kill -9 $PROXY_PID 2>/dev/null || true
+          fi
+
+      - name: Display proxy logs on failure
+        if: failure()
+        run: |
+          echo "=== P2Proxy Logs ==="
+          cat logs/p2proxy.log || echo "No logs found"
