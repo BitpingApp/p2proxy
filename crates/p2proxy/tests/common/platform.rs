@@ -354,8 +354,19 @@ mod tests {
 
         if is_macos() {
             assert_eq!(sleep_dur, Duration::from_millis(10));
+        } else if is_windows() {
+            assert_eq!(sleep_dur, Duration::from_millis(10));
         } else {
-            assert_eq!(sleep_dur, Duration::from_millis(5));
+            // Linux: base_ms.max(5) = 10.max(5) = 10
+            assert_eq!(sleep_dur, Duration::from_millis(10));
+        }
+
+        // Test minimum enforcement
+        let min_sleep = platform_sleep(1);
+        if is_macos() || is_windows() {
+            assert_eq!(min_sleep, Duration::from_millis(10)); // Enforces 10ms minimum
+        } else {
+            assert_eq!(min_sleep, Duration::from_millis(5)); // Enforces 5ms minimum
         }
     }
 }
