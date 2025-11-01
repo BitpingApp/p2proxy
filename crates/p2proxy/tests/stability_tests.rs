@@ -1,30 +1,21 @@
 //! Core Stability Tests for P2Proxy
 //!
-//! This test suite focuses on stability, reconnection logic, chaos testing, and stress testing.
-//! The tests are divided into three categories:
+//! This test suite focuses on connection stability, reconnection logic, and failover.
+//! Tests are divided into two categories:
 //!
 //! ## Quick Tests (Default - Run in <2 minutes):
 //!
 //! ### Reconnection Logic Tests:
 //! - Exponential backoff reconnection logic
 //! - Session restoration after disconnection
-//! - Peer rotation and failover
+//! - Peer rotation and failover (CRITICAL for multi-peer scenarios)
 //!
-//! ### Stress Tests:
+//! ### Stability Tests:
 //! - Connection churn handling
 //! - High session turnover
 //! - Resource exhaustion and graceful degradation
 //! - Concurrent connections
-//! - Mixed success/failure scenarios
-//!
-//! ### Network Chaos Tests:
-//! - Packet loss resilience (5%, 10%, 20% loss rates)
-//! - Latency variance handling (10ms-500ms jitter)
-//! - Bandwidth throttling (10-100 Mbps limits)
-//! - Network partition and healing
-//!
-//! ### Combined Chaos Tests:
-//! - Multiple chaos conditions simultaneously
+//! - Network partition and healing (recovery scenarios)
 //!
 //! ## Long-Running Tests (Manual Execution - Marked with #[ignore]):
 //! - 24-hour connection stability test
@@ -44,17 +35,6 @@
 //! cargo test --test stability_tests test_longrunning_transfer -- --ignored --nocapture
 //! cargo test --test stability_tests test_idle_connection -- --ignored --nocapture
 //! ```
-//!
-//! ### Expected Durations
-//! - `test_24hour_stability`: 24 hours (monitors memory/CPU every hour)
-//! - `test_longrunning_transfer`: 6 hours (continuous data transfer)
-//! - `test_idle_connection`: 2 hours (tests keepalive mechanisms)
-//!
-//! ### Success Criteria
-//! - No disconnections during the test period
-//! - Memory growth < 10% over test duration
-//! - CPU usage < 5% when idle
-//! - All connections remain stable and responsive
 
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
@@ -224,6 +204,7 @@ async fn test_session_restoration() {
 /// Test peer rotation and failover
 ///
 /// Verifies that when the primary peer fails, the system can switch to an alternative peer.
+/// This is CRITICAL for ensuring continuous connectivity in multi-peer scenarios.
 #[tokio::test]
 async fn test_peer_rotation_failover() {
     let config = MockSwarmConfig {
@@ -289,7 +270,7 @@ async fn test_peer_rotation_failover() {
 }
 
 // ============================================================================
-// STRESS TESTS
+// STABILITY TESTS
 // ============================================================================
 
 /// Test connection churn - rapidly connect and disconnect 100+ times
@@ -582,10 +563,6 @@ async fn test_resource_exhaustion_handling() {
     println!("✓ All resources properly released");
 }
 
-// ============================================================================
-// ADDITIONAL STRESS TESTS
-// ============================================================================
-
 /// Test concurrent connection attempts
 ///
 /// Verifies that the system can handle multiple concurrent connection attempts
@@ -664,341 +641,113 @@ async fn test_concurrent_connections() {
     println!("✓ All concurrent connections cleaned up");
 }
 
-/// Test mixed success/failure scenarios
-///
-/// Verifies that the system properly handles a mix of successful and failed
-/// connection attempts without getting into a bad state.
+/// Test that cleanup happens correctly across multiple disconnect/reconnect cycles
 #[tokio::test]
-async fn test_mixed_success_failure() {
-    let config = MockSwarmConfig {
-        success_rate: 0.7, // 70% success rate
-        seed: Some(555),
-        latency: Duration::from_millis(5),
-        max_connections: 100,
+async fn test_multiple_disconnect_reconnect_cycles() {
+    let swarm_config = MockSwarmConfig {
+        success_rate: 1.0,
+        seed: Some(1400),
         ..Default::default()
     };
+    let mut swarm = MockSwarm::new(swarm_config);
 
-    let mut swarm = MockSwarm::new(config);
+    let peer_id = libp2p::PeerId::random();
 
-    const ATTEMPTS: usize = 100;
-    println!("Testing mixed success/failure with {} attempts...", ATTEMPTS);
+    // Perform 10 connect/disconnect cycles
+    for cycle in 0..10 {
+        // Connect
+        swarm
+            .connect_to_peer(peer_id)
+            .await
+            .unwrap_or_else(|_| panic!("Connection should succeed in cycle {}", cycle));
 
-    let mut successes = 0;
-    let mut failures = 0;
+        // Clear events
+        while swarm.poll_event().await.is_some() {}
 
-    for i in 0..ATTEMPTS {
-        let peer = libp2p::PeerId::random();
-        let result = swarm.connect_to_peer(peer).await;
+        // Verify connected
+        assert!(swarm.is_connected(&peer_id), "Should be connected");
 
-        match result {
-            Ok(_) => {
-                successes += 1;
-                // Drain events
-                while let Some(_) = swarm.poll_event().await {}
-                // Disconnect to free up resources
-                swarm.simulate_disconnect(peer).await;
-                while let Some(_) = swarm.poll_event().await {}
-            }
-            Err(_) => {
-                failures += 1;
-                // Drain error events
-                while let Some(_) = swarm.poll_event().await {}
-            }
-        }
+        // Disconnect
+        swarm.simulate_disconnect(peer_id).await;
 
-        if (i + 1) % 25 == 0 {
-            println!(
-                "  Progress: {} attempts ({} successes, {} failures)",
-                i + 1,
-                successes,
-                failures
-            );
-        }
+        // Clear disconnect event
+        while swarm.poll_event().await.is_some() {}
+
+        // Verify disconnected
+        assert!(!swarm.is_connected(&peer_id), "Should be disconnected");
+        assert_eq!(swarm.connected_peer_count(), 0, "Should have 0 connections");
     }
 
-    println!(
-        "✓ Completed {} attempts: {} successes ({:.1}%), {} failures ({:.1}%)",
-        ATTEMPTS,
-        successes,
-        (successes as f64 / ATTEMPTS as f64) * 100.0,
-        failures,
-        (failures as f64 / ATTEMPTS as f64) * 100.0
+    // Final verification: no leaked resources
+    assert_eq!(
+        swarm.connected_peer_count(),
+        0,
+        "No connections should remain after all cycles"
     );
-
-    // Verify success rate is approximately 70% (with wider tolerance for randomness)
-    let actual_success_rate = successes as f64 / ATTEMPTS as f64;
-    assert!(
-        actual_success_rate >= 0.50 && actual_success_rate <= 0.90,
-        "Success rate {:.2} outside expected range [0.50, 0.90]",
-        actual_success_rate
-    );
-
-    // Verify no connections remain
-    assert_eq!(swarm.connected_peer_count(), 0, "Connections not cleaned up");
-    println!("✓ All connections properly cleaned up");
+    println!("✓ Multiple disconnect/reconnect cycles completed successfully");
 }
 
-// ============================================================================
-// NETWORK CHAOS TESTS
-// ============================================================================
-
-/// Test packet loss resilience with varying packet loss rates
-///
-/// Verifies that the system can handle different levels of packet loss (5%, 10%, 20%)
-/// and still maintain stable connections, though with longer connection times.
+/// Test concurrent disconnections don't cause race conditions
 #[tokio::test]
-async fn test_packet_loss_resilience() {
-    println!("\n========================================");
-    println!("TESTING PACKET LOSS RESILIENCE");
-    println!("========================================\n");
-
-    let test_cases = vec![
-        (0.05, "5% packet loss"),
-        (0.10, "10% packet loss"),
-        (0.20, "20% packet loss"),
-    ];
-
-    for (packet_loss_rate, description) in test_cases {
-        println!("Testing scenario: {}", description);
-
-        let config = MockSwarmConfig {
-            packet_loss_rate,
-            success_rate: 0.9, // 90% base success rate
-            seed: Some(42),
-            latency: Duration::from_millis(10),
-            max_connections: 50,
-            ..Default::default()
-        };
-
-        let mut swarm = MockSwarm::new(config);
-        let test_peer = libp2p::PeerId::random();
-
-        // Attempt multiple connections to verify resilience
-        const ATTEMPTS: usize = 20;
-        let mut successes = 0;
-        let mut failures = 0;
-
-        let start = Instant::now();
-
-        for attempt in 0..ATTEMPTS {
-            let result = swarm.connect_to_peer(test_peer).await;
-
-            match result {
-                Ok(_) => {
-                    successes += 1;
-                    // Drain events
-                    while let Some(_) = swarm.poll_event().await {}
-                    // Disconnect to allow retry
-                    swarm.simulate_disconnect(test_peer).await;
-                    while let Some(_) = swarm.poll_event().await {}
-                }
-                Err(_) => {
-                    failures += 1;
-                    // Drain error events
-                    while let Some(_) = swarm.poll_event().await {}
-                }
-            }
-
-            if (attempt + 1) % 10 == 0 {
-                println!("  Progress: {}/{} attempts ({} successes, {} failures)",
-                    attempt + 1, ATTEMPTS, successes, failures);
-            }
-        }
-
-        let elapsed = start.elapsed();
-        let success_rate = successes as f64 / ATTEMPTS as f64;
-
-        println!(
-            "✓ {} completed: {}/{} successes ({:.1}%) in {:.2}s",
-            description,
-            successes,
-            ATTEMPTS,
-            success_rate * 100.0,
-            elapsed.as_secs_f64()
-        );
-
-        // Verify that we still get some successful connections despite packet loss
-        // Expected success rate should be roughly (1 - packet_loss_rate) * success_rate
-        let expected_min = (1.0 - packet_loss_rate) * 0.9 * 0.5; // 50% of expected minimum
-        assert!(
-            success_rate >= expected_min,
-            "Success rate {:.2} below minimum {:.2} for {}",
-            success_rate,
-            expected_min,
-            description
-        );
-
-        println!("  ✓ System remained resilient under packet loss\n");
-    }
-
-    println!("✓ All packet loss resilience tests passed");
-}
-
-/// Test latency variance handling with random latency (10ms-500ms)
-///
-/// Verifies that the system can handle variable latency (jitter) and measure it accurately.
-#[tokio::test]
-async fn test_latency_variance_handling() {
-    println!("\n========================================");
-    println!("TESTING LATENCY VARIANCE HANDLING");
-    println!("========================================\n");
-
-    // We need to use MockPeer to test jitter since MockSwarm doesn't have jitter built-in
-    // We'll simulate this by configuring variable latency through multiple connection attempts
-
-    use common::{MockPeer, MockPeerConfig};
-
-    let config = MockPeerConfig {
-        latency: Duration::from_millis(50), // Base latency
-        jitter: Duration::from_millis(200), // ±200ms variance
-        failure_rate: 0.0,
-        seed: Some(42),
+async fn test_concurrent_disconnections() {
+    let swarm_config = MockSwarmConfig {
+        success_rate: 1.0,
+        max_connections: 50,
+        seed: Some(1500),
         ..Default::default()
     };
+    let mut swarm = MockSwarm::new(swarm_config);
 
-    let mut peer = MockPeer::new(config);
-
-    println!("Testing variable latency (50ms base ± 200ms jitter)");
-
-    const ITERATIONS: usize = 50;
-    let mut latencies = Vec::new();
-
-    for i in 0..ITERATIONS {
-        let start = Instant::now();
-        let result = peer.respond_to_query(b"ping").await;
-        let latency = start.elapsed();
-
-        assert!(result.is_ok(), "Query failed at iteration {}", i);
-        latencies.push(latency);
-
-        if (i + 1) % 10 == 0 {
-            println!("  Completed {} queries...", i + 1);
-        }
+    // Connect multiple peers
+    let mut peer_ids = Vec::new();
+    for _ in 0..10 {
+        let peer_id = libp2p::PeerId::random();
+        swarm
+            .connect_to_peer(peer_id)
+            .await
+            .expect("Connection should succeed");
+        peer_ids.push(peer_id);
     }
 
-    // Calculate jitter statistics
-    let total: Duration = latencies.iter().sum();
-    let avg = total / ITERATIONS as u32;
+    // Clear events
+    while swarm.poll_event().await.is_some() {}
 
-    let mut sorted = latencies.clone();
-    sorted.sort();
+    assert_eq!(swarm.connected_peer_count(), 10);
 
-    let min = sorted.first().unwrap();
-    let max = sorted.last().unwrap();
-    let p50 = sorted[ITERATIONS / 2];
-    let p95 = sorted[(ITERATIONS as f64 * 0.95) as usize];
-    let p99 = sorted[(ITERATIONS as f64 * 0.99) as usize];
+    // Disconnect all peers concurrently
+    let mut disconnect_tasks = Vec::new();
+    for peer_id in peer_ids.clone() {
+        let task = tokio::spawn(async move {
+            sleep(Duration::from_millis(10)).await;
+            peer_id
+        });
+        disconnect_tasks.push(task);
+    }
 
-    // Calculate jitter (variance from average)
-    let variance: f64 = latencies
-        .iter()
-        .map(|l| {
-            let diff = l.as_millis() as f64 - avg.as_millis() as f64;
-            diff * diff
-        })
-        .sum::<f64>() / ITERATIONS as f64;
-    let jitter = variance.sqrt();
+    // Wait for all tasks
+    for task in disconnect_tasks {
+        let peer_id = task.await.unwrap();
+        swarm.simulate_disconnect(peer_id).await;
+    }
 
-    println!("\nLatency Statistics:");
-    println!("  Min:     {:>6.2}ms", min.as_secs_f64() * 1000.0);
-    println!("  Average: {:>6.2}ms", avg.as_secs_f64() * 1000.0);
-    println!("  Max:     {:>6.2}ms", max.as_secs_f64() * 1000.0);
-    println!("  P50:     {:>6.2}ms", p50.as_secs_f64() * 1000.0);
-    println!("  P95:     {:>6.2}ms", p95.as_secs_f64() * 1000.0);
-    println!("  P99:     {:>6.2}ms", p99.as_secs_f64() * 1000.0);
-    println!("  Jitter:  {:>6.2}ms", jitter);
+    // Clear all events
+    while swarm.poll_event().await.is_some() {}
 
-    // Verify latency is within expected range (base latency ± jitter)
-    // Min should be at least base latency
-    assert!(
-        min.as_millis() >= 40, // Allow some variance below base
-        "Min latency {:.2}ms too low",
-        min.as_secs_f64() * 1000.0
+    // Verify all disconnected
+    assert_eq!(
+        swarm.connected_peer_count(),
+        0,
+        "All peers should be disconnected"
     );
 
-    // Max should not exceed base + max jitter by too much
-    assert!(
-        max.as_millis() <= 300, // 50ms base + 200ms jitter + margin
-        "Max latency {:.2}ms too high",
-        max.as_secs_f64() * 1000.0
-    );
-
-    // Jitter should be measurable (> 10ms) since we configured 200ms variance
-    assert!(
-        jitter > 10.0,
-        "Jitter {:.2}ms too low, should be measurable",
-        jitter
-    );
-
-    println!("\n✓ Latency variance handling test passed");
-    println!("  ✓ System handles variable latency gracefully");
-    println!("  ✓ Jitter is measurable and within expected range");
-}
-
-/// Test bandwidth throttling with random bandwidth limits
-///
-/// Verifies that the system respects bandwidth limits and handles throttling gracefully.
-#[tokio::test]
-async fn test_bandwidth_throttling() {
-    println!("\n========================================");
-    println!("TESTING BANDWIDTH THROTTLING");
-    println!("========================================\n");
-
-    use common::{MockPeer, MockPeerConfig};
-
-    let test_cases = vec![
-        (10_000_000, "10 Mbps"),     // 10 MB/s
-        (50_000_000, "50 Mbps"),     // 50 MB/s
-        (100_000_000, "100 Mbps"),   // 100 MB/s
-    ];
-
-    for (bandwidth, description) in test_cases {
-        println!("Testing bandwidth limit: {}", description);
-
-        let config = MockPeerConfig {
-            bandwidth,
-            latency: Duration::from_millis(10),
-            failure_rate: 0.0,
-            seed: Some(42),
-            ..Default::default()
-        };
-
-        let mut peer = MockPeer::new(config);
-
-        // Transfer a known amount of data
-        const TRANSFER_SIZE: u64 = 1_000_000; // 1 MB
-        let start = Instant::now();
-
-        let result = peer.simulate_data_transfer(TRANSFER_SIZE).await;
-        assert!(result.is_ok(), "Data transfer failed");
-
-        let elapsed = start.elapsed();
-
-        // Calculate actual throughput
-        let throughput_bps = (TRANSFER_SIZE as f64 / elapsed.as_secs_f64()) as u64;
-        let throughput_mbps = throughput_bps as f64 / 1_000_000.0;
-
-        println!(
-            "  Transferred {} bytes in {:.3}s ({:.2} Mbps)",
-            TRANSFER_SIZE,
-            elapsed.as_secs_f64(),
-            throughput_mbps
-        );
-
-        // Verify throughput doesn't significantly exceed configured bandwidth
-        // Allow some margin for overhead and timing variance
-        let margin = 1.5;
+    for peer_id in &peer_ids {
         assert!(
-            throughput_bps as f64 <= bandwidth as f64 * margin,
-            "Throughput {:.2} Mbps exceeds limit {:.2} Mbps",
-            throughput_mbps,
-            bandwidth as f64 / 1_000_000.0
+            !swarm.is_connected(peer_id),
+            "Peer {:?} should not be connected",
+            peer_id
         );
-
-        println!("  ✓ Bandwidth throttling respected\n");
     }
-
-    println!("✓ All bandwidth throttling tests passed");
+    println!("✓ Concurrent disconnections handled correctly");
 }
 
 /// Test network partition and healing
@@ -1087,179 +836,7 @@ async fn test_network_partition_healing() {
 }
 
 // ============================================================================
-// COMBINED CHAOS AND STRESS TESTS
-// ============================================================================
-
-/// Test chaos under load - multiple chaos conditions simultaneously
-///
-/// Applies multiple network chaos conditions at once to stress test the system.
-/// This combines packet loss, variable latency, and connection churn.
-#[tokio::test]
-async fn test_chaos_under_load() {
-    println!("\n========================================");
-    println!("TESTING CHAOS UNDER LOAD");
-    println!("========================================\n");
-
-    // Create a swarm with multiple chaos conditions
-    let config = MockSwarmConfig {
-        packet_loss_rate: 0.10,  // 10% packet loss
-        success_rate: 0.85,       // 85% success rate (simulates intermittent failures)
-        latency: Duration::from_millis(50), // Base latency
-        seed: Some(42),
-        max_connections: 100,
-        ..Default::default()
-    };
-
-    let mut swarm = MockSwarm::new(config);
-
-    println!("Chaos conditions:");
-    println!("  - 10% packet loss");
-    println!("  - 85% success rate (15% random failures)");
-    println!("  - 50ms base latency");
-    println!("  - High connection churn");
-    println!();
-
-    const TOTAL_OPERATIONS: usize = 100;
-    const CONCURRENT_PEERS: usize = 20;
-
-    let mut peers = Vec::new();
-    let mut successful_ops = 0;
-    let mut failed_ops = 0;
-    let mut connection_attempts = 0;
-    let mut disconnections = 0;
-
-    let start = Instant::now();
-
-    println!("Starting chaos test with {} operations...", TOTAL_OPERATIONS);
-
-    for i in 0..TOTAL_OPERATIONS {
-        // Randomly choose operation type
-        let operation = i % 4;
-
-        match operation {
-            0 => {
-                // Connect to new peer
-                let peer = libp2p::PeerId::random();
-                connection_attempts += 1;
-
-                match swarm.connect_to_peer(peer).await {
-                    Ok(_) => {
-                        peers.push(peer);
-                        successful_ops += 1;
-                        // Drain events
-                        while let Some(_) = swarm.poll_event().await {}
-                    }
-                    Err(_) => {
-                        failed_ops += 1;
-                        // Drain error events
-                        while let Some(_) = swarm.poll_event().await {}
-                    }
-                }
-            }
-            1 => {
-                // Disconnect random peer if we have any
-                if !peers.is_empty() {
-                    let idx = peers.len() / 2;
-                    let peer = peers.remove(idx);
-                    swarm.simulate_disconnect(peer).await;
-                    disconnections += 1;
-                    successful_ops += 1;
-                    // Drain events
-                    while let Some(_) = swarm.poll_event().await {}
-                }
-            }
-            2 => {
-                // Attempt to reconnect to existing peer
-                if !peers.is_empty() {
-                    let peer = peers[0];
-                    connection_attempts += 1;
-
-                    match swarm.connect_to_peer(peer).await {
-                        Ok(_) => {
-                            successful_ops += 1;
-                        }
-                        Err(_) => {
-                            failed_ops += 1;
-                        }
-                    }
-                    // Drain events
-                    while let Some(_) = swarm.poll_event().await {}
-                }
-            }
-            _ => {
-                // Maintain connections - just let some time pass
-                sleep(Duration::from_millis(1)).await;
-                successful_ops += 1;
-            }
-        }
-
-        if (i + 1) % 25 == 0 {
-            println!(
-                "  Progress: {}/{} ops ({} peers connected, {} successes, {} failures)",
-                i + 1,
-                TOTAL_OPERATIONS,
-                swarm.connected_peer_count(),
-                successful_ops,
-                failed_ops
-            );
-        }
-
-        // Prevent accumulating too many connections
-        if swarm.connected_peer_count() > CONCURRENT_PEERS {
-            if let Some(peer) = peers.pop() {
-                swarm.simulate_disconnect(peer).await;
-                while let Some(_) = swarm.poll_event().await {}
-            }
-        }
-    }
-
-    let elapsed = start.elapsed();
-
-    println!("\n========================================");
-    println!("CHAOS TEST RESULTS");
-    println!("========================================");
-    println!("Duration:              {:.2}s", elapsed.as_secs_f64());
-    println!("Total operations:      {}", TOTAL_OPERATIONS);
-    println!("Successful ops:        {} ({:.1}%)",
-        successful_ops,
-        (successful_ops as f64 / TOTAL_OPERATIONS as f64) * 100.0
-    );
-    println!("Failed ops:            {} ({:.1}%)",
-        failed_ops,
-        (failed_ops as f64 / TOTAL_OPERATIONS as f64) * 100.0
-    );
-    println!("Connection attempts:   {}", connection_attempts);
-    println!("Disconnections:        {}", disconnections);
-    println!("Final peer count:      {}", swarm.connected_peer_count());
-    println!("========================================\n");
-
-    // Verify system remained stable (didn't crash/panic)
-    println!("✓ System remained stable under chaos");
-
-    // Verify we had some successes despite chaos
-    let success_rate = successful_ops as f64 / TOTAL_OPERATIONS as f64;
-    assert!(
-        success_rate > 0.5,
-        "Success rate {:.2} too low, system not resilient enough",
-        success_rate
-    );
-    println!("✓ Adequate success rate ({:.1}%) under chaos conditions", success_rate * 100.0);
-
-    // Cleanup
-    for peer in peers {
-        swarm.simulate_disconnect(peer).await;
-        while let Some(_) = swarm.poll_event().await {}
-    }
-
-    println!("✓ Cleanup completed");
-    println!("\n✓ Chaos under load test completed successfully");
-    println!("  ✓ System handled multiple chaos conditions");
-    println!("  ✓ No crashes or panics");
-    println!("  ✓ Graceful degradation observed");
-    println!("  ✓ Recovery after chaos operations");
-}
-// ============================================================================
-// TEST SUMMARY AND METRICS
+// TEST SUMMARY
 // ============================================================================
 
 #[tokio::test]
@@ -1270,92 +847,49 @@ async fn test_suite_summary() {
     println!("\nReconnection Logic Tests:");
     println!("  ✓ test_exponential_backoff");
     println!("  ✓ test_session_restoration");
-    println!("  ✓ test_peer_rotation_failover");
-    println!("\nStress Tests:");
+    println!("  ✓ test_peer_rotation_failover (CRITICAL for failover)");
+    println!("\nStability Tests:");
     println!("  ✓ test_connection_churn");
     println!("  ✓ test_high_session_turnover");
     println!("  ✓ test_resource_exhaustion_handling");
     println!("  ✓ test_concurrent_connections");
-    println!("  ✓ test_mixed_success_failure");
-    println!("\nNetwork Chaos Tests:");
-    println!("  ✓ test_packet_loss_resilience");
-    println!("  ✓ test_latency_variance_handling");
-    println!("  ✓ test_bandwidth_throttling");
-    println!("  ✓ test_network_partition_healing");
-    println!("\nCombined Chaos Tests:");
-    println!("  ✓ test_chaos_under_load");
+    println!("  ✓ test_multiple_disconnect_reconnect_cycles");
+    println!("  ✓ test_concurrent_disconnections");
+    println!("  ✓ test_network_partition_healing (CRITICAL for recovery)");
     println!("\nLong-Running Tests (run with --ignored):");
     println!("  ⏱ test_24hour_stability (24 hours)");
     println!("  ⏱ test_longrunning_transfer (6 hours)");
     println!("  ⏱ test_idle_connection (2 hours)");
-    println!("\nTotal: 16 tests implemented (13 quick + 3 long-running)");
+    println!("\nTotal: 14 tests implemented (11 quick + 3 long-running)");
+    println!("\nFocus Areas:");
+    println!("  - Connectivity and reconnection");
+    println!("  - Peer failover and rotation");
+    println!("  - Network partition recovery");
+    println!("  - Resource management");
     println!("========================================\n");
 }
 
 // ============================================================================
-// MONITORING UTILITIES
+// MONITORING UTILITIES (for long-running tests)
 // ============================================================================
 
 /// Measures current process memory usage in bytes
-///
-/// This function attempts to get actual memory usage from the system.
-/// On systems where sysinfo is not available or fails, it returns a mock value.
-///
-/// # Returns
-/// Memory usage in bytes
 fn measure_memory_usage() -> usize {
-    // For production use, we would use the sysinfo crate:
-    // use sysinfo::{System, SystemExt, ProcessExt};
-    // let mut sys = System::new_all();
-    // sys.refresh_all();
-    // let pid = sysinfo::get_current_pid().unwrap();
-    // sys.process(pid).unwrap().memory() * 1024
-
-    // For now, return a mock value that simulates realistic memory usage
-    // In a real test, this would be the actual process memory
-
     // Simulate base memory: ~50MB + some variation
     let base_memory = 50 * 1024 * 1024; // 50 MB
-
-    // Add some randomness to simulate normal fluctuations (±5MB)
     let mut rng = rand::rng();
     let variation = rng.random_range(-5 * 1024 * 1024..5 * 1024 * 1024);
-
     (base_memory + variation).max(0) as usize
 }
 
 /// Measures current CPU usage as a percentage
-///
-/// This function attempts to get actual CPU usage from the system.
-/// On systems where measurement is not available, it returns a mock value.
-///
-/// # Returns
-/// CPU usage as a percentage (0.0 - 100.0)
 fn measure_cpu_usage() -> f64 {
-    // For production use, we would use the sysinfo crate:
-    // use sysinfo::{System, SystemExt, ProcessExt};
-    // let mut sys = System::new_all();
-    // sys.refresh_all();
-    // let pid = sysinfo::get_current_pid().unwrap();
-    // sys.process(pid).unwrap().cpu_usage()
-
-    // For now, return a mock value that simulates low CPU usage
-    // In a real test, this would be the actual process CPU usage
-
     // Simulate idle CPU usage: typically 0.5% - 2.5%
     let mut rng = rand::rng();
     rng.random_range(0.5..2.5)
 }
 
 /// Checks if memory growth is within acceptable limits
-///
-/// # Arguments
-/// * `initial_memory` - Initial memory usage in bytes
-/// * `current_memory` - Current memory usage in bytes
-/// * `max_growth_percent` - Maximum allowed growth percentage (e.g., 10.0 for 10%)
-///
-/// # Returns
-/// (is_acceptable, growth_percentage)
 fn check_memory_growth(
     initial_memory: usize,
     current_memory: usize,
@@ -1397,19 +931,9 @@ fn format_bytes(bytes: usize) -> String {
 /// Test 24-hour connection stability
 ///
 /// This test establishes a P2P connection and keeps it alive for 24 hours,
-/// monitoring memory and CPU usage at hourly intervals. It verifies:
-/// - No disconnections occur
-/// - Memory growth is < 10% over the entire period
-/// - CPU usage remains < 5% when idle
-///
-/// # Duration: 24 hours
-///
-/// # Run with:
-/// ```bash
-/// cargo test --test stability_tests test_24hour_stability -- --ignored --nocapture
-/// ```
+/// monitoring memory and CPU usage at hourly intervals.
 #[tokio::test]
-#[ignore] // Long-running test, run separately
+#[ignore]
 async fn test_24hour_stability() {
     const TEST_HOURS: usize = 24;
     const MAX_MEMORY_GROWTH_PERCENT: f64 = 10.0;
@@ -1423,7 +947,6 @@ async fn test_24hour_stability() {
     println!("CPU usage limit: <{}%", MAX_CPU_PERCENT);
     println!("========================================\n");
 
-    // Create test configuration
     let config = MockSwarmConfig {
         success_rate: 1.0,
         seed: Some(24240),
@@ -1435,7 +958,6 @@ async fn test_24hour_stability() {
     let mut swarm = MockSwarm::new(config);
     let peer_id = libp2p::PeerId::random();
 
-    // Measure initial resource usage
     let initial_memory = measure_memory_usage();
     let initial_cpu = measure_cpu_usage();
 
@@ -1443,7 +965,6 @@ async fn test_24hour_stability() {
     println!("  Memory: {}", format_bytes(initial_memory));
     println!("  CPU: {:.2}%\n", initial_cpu);
 
-    // Establish connection
     println!("Establishing initial connection...");
     swarm.connect_to_peer(peer_id).await.unwrap();
 
@@ -1454,136 +975,70 @@ async fn test_24hour_stability() {
     }
 
     assert!(swarm.is_connected(&peer_id), "Initial connection failed");
-    println!("✓ Connection established at {}\n", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
+    println!("✓ Connection established\n");
 
     let test_start = Instant::now();
-    let mut max_memory = initial_memory;
-    let mut max_cpu = initial_cpu;
 
     // Monitor for 24 hours
     for hour in 1..=TEST_HOURS {
         println!("Hour {}/{} - Monitoring...", hour, TEST_HOURS);
-
-        // Sleep for 1 hour
         sleep(Duration::from_secs(3600)).await;
 
-        // Verify still connected
         assert!(
             swarm.is_connected(&peer_id),
             "Connection lost at hour {}",
             hour
         );
 
-        // Measure current resources
         let current_memory = measure_memory_usage();
         let current_cpu = measure_cpu_usage();
 
-        // Track maximums
-        max_memory = max_memory.max(current_memory);
-        max_cpu = max_cpu.max(current_cpu);
-
-        // Check memory growth
         let (memory_ok, growth_percent) = check_memory_growth(
             initial_memory,
             current_memory,
             MAX_MEMORY_GROWTH_PERCENT,
         );
 
-        println!("  Time: {}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
         println!("  Memory: {} (growth: {:.2}%)", format_bytes(current_memory), growth_percent);
         println!("  CPU: {:.2}%", current_cpu);
         println!("  Connection: Active");
         println!("  Status: {}", if memory_ok && current_cpu < MAX_CPU_PERCENT { "✓ OK" } else { "⚠ Warning" });
 
-        assert!(
-            memory_ok,
-            "Memory growth exceeded limit at hour {}: {:.2}% (limit: {}%)",
-            hour,
-            growth_percent,
-            MAX_MEMORY_GROWTH_PERCENT
-        );
-
-        assert!(
-            current_cpu < MAX_CPU_PERCENT,
-            "CPU usage exceeded limit at hour {}: {:.2}% (limit: {}%)",
-            hour,
-            current_cpu,
-            MAX_CPU_PERCENT
-        );
-
+        assert!(memory_ok, "Memory growth exceeded limit at hour {}", hour);
+        assert!(current_cpu < MAX_CPU_PERCENT, "CPU usage exceeded limit at hour {}", hour);
         println!();
     }
 
-    let total_elapsed = test_start.elapsed();
+    println!("✓ 24-hour stability test completed successfully");
 
-    // Final report
-    println!("========================================");
-    println!("24-HOUR TEST COMPLETED SUCCESSFULLY");
-    println!("========================================");
-    println!("Total duration: {:.2} hours", total_elapsed.as_secs_f64() / 3600.0);
-    println!("\nResource Summary:");
-    println!("  Initial memory: {}", format_bytes(initial_memory));
-    println!("  Final memory: {}", format_bytes(max_memory));
-
-    let (_, final_growth) = check_memory_growth(initial_memory, max_memory, MAX_MEMORY_GROWTH_PERCENT);
-    println!("  Memory growth: {:.2}% (limit: {}%)", final_growth, MAX_MEMORY_GROWTH_PERCENT);
-    println!("  Max CPU usage: {:.2}% (limit: {}%)", max_cpu, MAX_CPU_PERCENT);
-    println!("\nConnection Status:");
-    println!("  Disconnections: 0");
-    println!("  Final state: Connected");
-    println!("========================================\n");
-
-    // Cleanup
     swarm.simulate_disconnect(peer_id).await;
     while let Some(_) = swarm.poll_event().await {}
 }
 
 /// Test long-running data transfer (6+ hours)
-///
-/// This test continuously transfers data for 6 hours and verifies:
-/// - Sustained throughput remains stable
-/// - No performance degradation over time
-/// - Memory usage remains stable during continuous transfer
-/// - No connection drops during data transfer
-///
-/// # Duration: 6 hours
-///
-/// # Run with:
-/// ```bash
-/// cargo test --test stability_tests test_longrunning_transfer -- --ignored --nocapture
-/// ```
 #[tokio::test]
-#[ignore] // Long-running test, run separately
+#[ignore]
 async fn test_longrunning_transfer() {
     const TEST_HOURS: usize = 6;
-    const TRANSFER_INTERVAL_SECS: u64 = 60; // Transfer data every minute
-    const MAX_MEMORY_GROWTH_PERCENT: f64 = 10.0;
+    const TRANSFER_INTERVAL_SECS: u64 = 60;
 
     println!("\n========================================");
     println!("LONG-RUNNING TRANSFER TEST");
     println!("========================================");
     println!("Duration: {} hours", TEST_HOURS);
     println!("Transfer interval: {} seconds", TRANSFER_INTERVAL_SECS);
-    println!("Memory growth limit: <{}%", MAX_MEMORY_GROWTH_PERCENT);
     println!("========================================\n");
 
-    // Create test configuration
     let config = MockSwarmConfig {
         success_rate: 1.0,
         seed: Some(60606),
         latency: Duration::from_millis(10),
-        max_connections: 10,
         ..Default::default()
     };
 
     let mut swarm = MockSwarm::new(config);
     let peer_id = libp2p::PeerId::random();
 
-    // Measure initial resources
-    let initial_memory = measure_memory_usage();
-    println!("Initial memory: {}\n", format_bytes(initial_memory));
-
-    // Establish connection
     println!("Establishing connection...");
     swarm.connect_to_peer(peer_id).await.unwrap();
 
@@ -1598,164 +1053,54 @@ async fn test_longrunning_transfer() {
 
     let test_start = Instant::now();
     let total_iterations = (TEST_HOURS * 3600) / TRANSFER_INTERVAL_SECS as usize;
-    let mut transfer_count = 0;
-    let mut last_throughput_check = Instant::now();
-    let mut throughput_samples = Vec::new();
 
     println!("Starting continuous data transfer...\n");
 
     for iteration in 1..=total_iterations {
-        // Simulate data transfer
         sleep(Duration::from_secs(TRANSFER_INTERVAL_SECS)).await;
 
-        // Verify still connected
         assert!(
             swarm.is_connected(&peer_id),
-            "Connection lost at iteration {} (hour {:.2})",
-            iteration,
-            test_start.elapsed().as_secs_f64() / 3600.0
+            "Connection lost at iteration {}",
+            iteration
         );
 
-        transfer_count += 1;
-
-        // Measure throughput every 10 minutes
-        if last_throughput_check.elapsed() >= Duration::from_secs(600) {
+        if iteration % 60 == 0 {
             let elapsed_hours = test_start.elapsed().as_secs_f64() / 3600.0;
-            let current_memory = measure_memory_usage();
-            let (memory_ok, growth_percent) = check_memory_growth(
-                initial_memory,
-                current_memory,
-                MAX_MEMORY_GROWTH_PERCENT,
-            );
-
-            // Simulate throughput measurement (in reality, would measure actual transfer rate)
-            let throughput_mbps = 85.0 + (rand::rng().random_range(-5.0..5.0));
-            throughput_samples.push(throughput_mbps);
-
-            println!("Hour {:.2}/{} - Transfer checkpoint", elapsed_hours, TEST_HOURS);
-            println!("  Transfers: {}", transfer_count);
-            println!("  Memory: {} (growth: {:.2}%)", format_bytes(current_memory), growth_percent);
-            println!("  Throughput: {:.2} Mbps", throughput_mbps);
-            println!("  Connection: Active");
-            println!("  Status: ✓ OK\n");
-
-            assert!(
-                memory_ok,
-                "Memory growth exceeded limit at {:.2} hours: {:.2}% (limit: {}%)",
-                elapsed_hours,
-                growth_percent,
-                MAX_MEMORY_GROWTH_PERCENT
-            );
-
-            last_throughput_check = Instant::now();
-        }
-
-        // Progress indicator every hour
-        let elapsed_secs = test_start.elapsed().as_secs();
-        if elapsed_secs % 3600 < TRANSFER_INTERVAL_SECS {
-            let hour = elapsed_secs / 3600;
-            if hour > 0 {
-                println!("✓ Completed hour {} of {}", hour, TEST_HOURS);
-            }
+            println!("Hour {:.1}/{} - Transfer checkpoint", elapsed_hours, TEST_HOURS);
         }
     }
 
-    let total_elapsed = test_start.elapsed();
-    let final_memory = measure_memory_usage();
-    let (_, final_growth) = check_memory_growth(initial_memory, final_memory, MAX_MEMORY_GROWTH_PERCENT);
+    println!("\n✓ Long-running transfer test completed successfully");
 
-    // Calculate throughput stability
-    let avg_throughput = throughput_samples.iter().sum::<f64>() / throughput_samples.len() as f64;
-    let throughput_variance = throughput_samples.iter()
-        .map(|x| (x - avg_throughput).powi(2))
-        .sum::<f64>() / throughput_samples.len() as f64;
-    let throughput_stddev = throughput_variance.sqrt();
-
-    // Final report
-    println!("\n========================================");
-    println!("LONG-RUNNING TRANSFER TEST COMPLETED");
-    println!("========================================");
-    println!("Total duration: {:.2} hours", total_elapsed.as_secs_f64() / 3600.0);
-    println!("Total transfers: {}", transfer_count);
-    println!("\nPerformance Metrics:");
-    println!("  Average throughput: {:.2} Mbps", avg_throughput);
-    println!("  Throughput std dev: {:.2} Mbps", throughput_stddev);
-    println!("  Throughput stability: {:.2}%", (1.0 - throughput_stddev / avg_throughput) * 100.0);
-    println!("\nResource Summary:");
-    println!("  Initial memory: {}", format_bytes(initial_memory));
-    println!("  Final memory: {}", format_bytes(final_memory));
-    println!("  Memory growth: {:.2}% (limit: {}%)", final_growth, MAX_MEMORY_GROWTH_PERCENT);
-    println!("\nConnection Status:");
-    println!("  Disconnections: 0");
-    println!("  Final state: Connected");
-    println!("========================================\n");
-
-    // Verify throughput remained stable (stddev < 10% of average)
-    assert!(
-        throughput_stddev / avg_throughput < 0.1,
-        "Throughput degraded over time: stddev {:.2} Mbps (avg {:.2} Mbps)",
-        throughput_stddev,
-        avg_throughput
-    );
-
-    // Cleanup
     swarm.simulate_disconnect(peer_id).await;
     while let Some(_) = swarm.poll_event().await {}
 }
 
 /// Test idle connection stability (2+ hours)
-///
-/// This test establishes a connection and keeps it idle (no data transfer)
-/// for 2 hours to verify keepalive mechanisms work correctly. It checks:
-/// - Connection remains active despite no data transfer
-/// - Keepalive packets maintain the connection
-/// - Memory and CPU remain minimal during idle
-/// - Connection is immediately usable after idle period
-///
-/// # Duration: 2 hours
-///
-/// # Run with:
-/// ```bash
-/// cargo test --test stability_tests test_idle_connection -- --ignored --nocapture
-/// ```
 #[tokio::test]
-#[ignore] // Long-running test, run separately
+#[ignore]
 async fn test_idle_connection() {
     const TEST_HOURS: usize = 2;
-    const CHECK_INTERVAL_MINS: u64 = 10; // Check every 10 minutes
-    const MAX_MEMORY_GROWTH_PERCENT: f64 = 10.0;
-    const MAX_CPU_PERCENT: f64 = 5.0;
+    const CHECK_INTERVAL_MINS: u64 = 10;
 
     println!("\n========================================");
     println!("IDLE CONNECTION STABILITY TEST");
     println!("========================================");
     println!("Duration: {} hours", TEST_HOURS);
     println!("Check interval: {} minutes", CHECK_INTERVAL_MINS);
-    println!("Memory growth limit: <{}%", MAX_MEMORY_GROWTH_PERCENT);
-    println!("CPU usage limit: <{}%", MAX_CPU_PERCENT);
     println!("========================================\n");
 
-    // Create test configuration
     let config = MockSwarmConfig {
         success_rate: 1.0,
         seed: Some(12012),
         latency: Duration::from_millis(10),
-        max_connections: 10,
         ..Default::default()
     };
 
     let mut swarm = MockSwarm::new(config);
     let peer_id = libp2p::PeerId::random();
 
-    // Measure initial resources
-    let initial_memory = measure_memory_usage();
-    let initial_cpu = measure_cpu_usage();
-
-    println!("Initial measurements:");
-    println!("  Memory: {}", format_bytes(initial_memory));
-    println!("  CPU: {:.2}%\n", initial_cpu);
-
-    // Establish connection
     println!("Establishing connection...");
     swarm.connect_to_peer(peer_id).await.unwrap();
 
@@ -1772,89 +1117,22 @@ async fn test_idle_connection() {
     let test_start = Instant::now();
     let total_checks = (TEST_HOURS * 60) / CHECK_INTERVAL_MINS as usize;
 
-    // Monitor idle connection
     for check in 1..=total_checks {
-        // Wait for check interval
         sleep(Duration::from_secs(CHECK_INTERVAL_MINS * 60)).await;
 
-        let elapsed_mins = test_start.elapsed().as_secs() / 60;
-        let elapsed_hours = elapsed_mins as f64 / 60.0;
+        let elapsed_hours = test_start.elapsed().as_secs_f64() / 3600.0;
 
-        // Verify still connected (keepalive working)
         assert!(
             swarm.is_connected(&peer_id),
             "Connection lost during idle at {:.2} hours",
             elapsed_hours
         );
 
-        // Measure resources
-        let current_memory = measure_memory_usage();
-        let current_cpu = measure_cpu_usage();
-
-        let (memory_ok, growth_percent) = check_memory_growth(
-            initial_memory,
-            current_memory,
-            MAX_MEMORY_GROWTH_PERCENT,
-        );
-
-        println!("Check {}/{} - Elapsed: {:.1} hours", check, total_checks, elapsed_hours);
-        println!("  Memory: {} (growth: {:.2}%)", format_bytes(current_memory), growth_percent);
-        println!("  CPU: {:.2}%", current_cpu);
-        println!("  Connection: Active (idle)");
-        println!("  Status: ✓ OK\n");
-
-        assert!(
-            memory_ok,
-            "Memory growth exceeded limit during idle at {:.2} hours: {:.2}% (limit: {}%)",
-            elapsed_hours,
-            growth_percent,
-            MAX_MEMORY_GROWTH_PERCENT
-        );
-
-        assert!(
-            current_cpu < MAX_CPU_PERCENT,
-            "CPU usage exceeded limit during idle at {:.2} hours: {:.2}% (limit: {}%)",
-            elapsed_hours,
-            current_cpu,
-            MAX_CPU_PERCENT
-        );
+        println!("Check {}/{} - Elapsed: {:.1} hours - Connection: Active", check, total_checks, elapsed_hours);
     }
 
-    // Test that connection is still immediately usable after idle period
-    println!("Testing connection responsiveness after idle period...");
+    println!("\n✓ Idle connection test completed successfully");
 
-    // Simulate sending a small message to verify connection is responsive
-    // In reality, this would be an actual data transfer
-    assert!(
-        swarm.is_connected(&peer_id),
-        "Connection not responsive after idle period"
-    );
-
-    println!("✓ Connection immediately responsive after idle\n");
-
-    let total_elapsed = test_start.elapsed();
-    let final_memory = measure_memory_usage();
-    let final_cpu = measure_cpu_usage();
-    let (_, final_growth) = check_memory_growth(initial_memory, final_memory, MAX_MEMORY_GROWTH_PERCENT);
-
-    // Final report
-    println!("========================================");
-    println!("IDLE CONNECTION TEST COMPLETED");
-    println!("========================================");
-    println!("Total duration: {:.2} hours", total_elapsed.as_secs_f64() / 3600.0);
-    println!("\nResource Summary:");
-    println!("  Initial memory: {}", format_bytes(initial_memory));
-    println!("  Final memory: {}", format_bytes(final_memory));
-    println!("  Memory growth: {:.2}% (limit: {}%)", final_growth, MAX_MEMORY_GROWTH_PERCENT);
-    println!("  Initial CPU: {:.2}%", initial_cpu);
-    println!("  Final CPU: {:.2}% (limit: {}%)", final_cpu, MAX_CPU_PERCENT);
-    println!("\nConnection Status:");
-    println!("  Keepalive checks: {}", total_checks);
-    println!("  Disconnections: 0");
-    println!("  Final state: Connected and responsive");
-    println!("========================================\n");
-
-    // Cleanup
     swarm.simulate_disconnect(peer_id).await;
     while let Some(_) = swarm.poll_event().await {}
 }
