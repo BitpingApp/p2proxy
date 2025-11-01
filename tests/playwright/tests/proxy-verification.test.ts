@@ -10,8 +10,11 @@ import { verifyProxyUsage, TIMEOUTS } from './test-utils';
 test.describe('Proxy Verification', () => {
   test('should route traffic through SOCKS5 proxy', async ({ page }) => {
     // Verify proxy is actually being used
-    const proxyWorks = await verifyProxyUsage(page);
-    expect(proxyWorks).toBeTruthy();
+    const result = await verifyProxyUsage(page);
+    if (!result.success) {
+      console.error(`Proxy verification failed: ${result.error} - ${result.details}`);
+    }
+    expect(result.success).toBeTruthy();
   });
 
   test('should successfully connect through proxy', async ({ page }) => {
@@ -44,20 +47,15 @@ test.describe('Proxy Verification', () => {
   });
 
   test('should expose proxy metrics endpoint', async ({ request }) => {
-    try {
-      // Test that Prometheus metrics are exposed
-      const response = await request.get('http://localhost:9091/metrics', {
-        timeout: TIMEOUTS.CONTENT_LOAD,
-      });
+    // Test that Prometheus metrics are exposed
+    const response = await request.get('http://localhost:9091/metrics', {
+      timeout: TIMEOUTS.CONTENT_LOAD,
+    });
 
-      expect(response.ok()).toBeTruthy();
+    expect(response.ok()).toBeTruthy();
 
-      const metricsText = await response.text();
-      expect(metricsText).toContain('p2proxy');
-    } catch (error) {
-      // Metrics endpoint might not be accessible from test context
-      console.log('Metrics endpoint not accessible, skipping verification');
-    }
+    const metricsText = await response.text();
+    expect(metricsText).toContain('p2proxy');
   });
 
   test('should fail with non-existent proxy', async ({ browser }) => {
@@ -67,20 +65,25 @@ test.describe('Proxy Verification', () => {
         server: 'socks5://localhost:9999', // Non-existent proxy port
       },
     });
-    const page = await context.newPage();
 
-    // Should fail to connect
-    let connectionFailed = false;
     try {
-      await page.goto('https://www.wikipedia.org/', {
-        timeout: 5000, // Short timeout
-      });
-    } catch (error) {
-      connectionFailed = true;
-    }
+      const page = await context.newPage();
 
-    expect(connectionFailed).toBeTruthy();
-    await context.close();
+      // Should fail to connect
+      let connectionFailed = false;
+      try {
+        await page.goto('https://www.wikipedia.org/', {
+          timeout: 5000, // Short timeout
+        });
+      } catch (error) {
+        connectionFailed = true;
+      }
+
+      expect(connectionFailed).toBeTruthy();
+    } finally {
+      // Ensure context is always closed
+      await context.close();
+    }
   });
 
   test('should preserve headers through proxy', async ({ page }) => {
@@ -121,31 +124,34 @@ test.describe('Proxy Verification', () => {
       },
     });
 
-    // Create multiple pages
-    const pages = await Promise.all([
-      context.newPage(),
-      context.newPage(),
-      context.newPage(),
-    ]);
+    try {
+      // Create multiple pages
+      const pages = await Promise.all([
+        context.newPage(),
+        context.newPage(),
+        context.newPage(),
+      ]);
 
-    // Navigate concurrently to different endpoints
-    const navigations = pages.map((page, index) =>
-      page.goto(`https://httpbin.org/delay/${index}`, {
-        waitUntil: 'domcontentloaded',
-        timeout: TIMEOUTS.PAGE_LOAD,
-      })
-    );
+      // Navigate concurrently to different endpoints
+      const navigations = pages.map((page, index) =>
+        page.goto(`https://httpbin.org/delay/${index}`, {
+          waitUntil: 'domcontentloaded',
+          timeout: TIMEOUTS.PAGE_LOAD,
+        })
+      );
 
-    // All should complete successfully
-    await Promise.all(navigations);
+      // All should complete successfully
+      await Promise.all(navigations);
 
-    // Verify all pages loaded
-    for (const page of pages) {
-      const hasContent = await page.locator('body').isVisible();
-      expect(hasContent).toBeTruthy();
-      await page.close();
+      // Verify all pages loaded
+      for (const page of pages) {
+        const hasContent = await page.locator('body').isVisible();
+        expect(hasContent).toBeTruthy();
+        await page.close();
+      }
+    } finally {
+      // Ensure context is always closed
+      await context.close();
     }
-
-    await context.close();
   });
 });

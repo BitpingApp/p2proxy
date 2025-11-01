@@ -7,6 +7,9 @@ import { test, expect } from '@playwright/test';
  */
 
 test.describe('News Website Tests', () => {
+  // Configure retries for this test suite due to external service variability
+  test.describe.configure({ retries: 2 });
+
   test('should load BBC News homepage', async ({ page }) => {
     await page.goto('https://www.bbc.com/news', { waitUntil: 'domcontentloaded' });
 

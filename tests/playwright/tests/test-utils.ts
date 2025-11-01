@@ -1,3 +1,5 @@
+import { Page, Locator } from '@playwright/test';
+
 /**
  * Test utilities and constants for Playwright proxy tests
  */
@@ -38,7 +40,7 @@ export const RETRY_CONFIG = {
  * Helper function to wait for content with better error messages
  */
 export async function waitForContent(
-  page: any,
+  page: Page,
   selector: string,
   options?: { timeout?: number }
 ): Promise<boolean> {
@@ -59,7 +61,7 @@ export async function waitForContent(
  * Uses actual load state instead of arbitrary timeout
  */
 export async function waitForPageReady(
-  page: any,
+  page: Page,
   options?: { waitUntil?: 'load' | 'domcontentloaded' | 'networkidle' }
 ): Promise<void> {
   const waitUntil = options?.waitUntil || 'domcontentloaded';
@@ -70,10 +72,29 @@ export async function waitForPageReady(
 }
 
 /**
- * Helper function to check if proxy is being used
- * Returns true if the connection appears to go through a proxy
+ * Error types for proxy verification
  */
-export async function verifyProxyUsage(page: any): Promise<boolean> {
+export enum ProxyVerificationError {
+  CONNECTION_FAILED = 'CONNECTION_FAILED',
+  TIMEOUT = 'TIMEOUT',
+  INVALID_RESPONSE = 'INVALID_RESPONSE',
+  NETWORK_ERROR = 'NETWORK_ERROR',
+}
+
+/**
+ * Result type for proxy verification
+ */
+export interface ProxyVerificationResult {
+  success: boolean;
+  error?: ProxyVerificationError;
+  details?: string;
+}
+
+/**
+ * Helper function to check if proxy is being used
+ * Returns detailed result with error information
+ */
+export async function verifyProxyUsage(page: Page): Promise<ProxyVerificationResult> {
   try {
     await page.goto('https://httpbin.org/get', {
       waitUntil: 'domcontentloaded',
@@ -83,10 +104,31 @@ export async function verifyProxyUsage(page: any): Promise<boolean> {
     const body = await page.locator('body').textContent();
 
     // The page should load and show connection info
-    return body !== null && body.length > 0;
-  } catch (error) {
-    console.error('Proxy verification failed:', error);
-    return false;
+    if (!body || body.length === 0) {
+      return {
+        success: false,
+        error: ProxyVerificationError.INVALID_RESPONSE,
+        details: 'Empty response from httpbin.org',
+      };
+    }
+
+    return { success: true };
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+
+    // Determine error type based on message
+    let errorType = ProxyVerificationError.NETWORK_ERROR;
+    if (errorMessage.includes('Timeout')) {
+      errorType = ProxyVerificationError.TIMEOUT;
+    } else if (errorMessage.includes('net::ERR_PROXY_CONNECTION_FAILED')) {
+      errorType = ProxyVerificationError.CONNECTION_FAILED;
+    }
+
+    return {
+      success: false,
+      error: errorType,
+      details: errorMessage,
+    };
   }
 }
 
@@ -94,7 +136,7 @@ export async function verifyProxyUsage(page: any): Promise<boolean> {
  * Helper to measure page load time
  */
 export async function measurePageLoadTime(
-  page: any,
+  page: Page,
   url: string
 ): Promise<number> {
   const startTime = Date.now();
@@ -107,9 +149,9 @@ export async function measurePageLoadTime(
  * Handles cases where elements might not be present
  */
 export async function safelyInteract(
-  page: any,
+  page: Page,
   selector: string,
-  action: (element: any) => Promise<void>,
+  action: (element: Locator) => Promise<void>,
   options?: { timeout?: number; fallbackMessage?: string }
 ): Promise<boolean> {
   try {

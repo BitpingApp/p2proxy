@@ -8,6 +8,9 @@ import { waitForPageReady, safelyInteract, TIMEOUTS } from './test-utils';
  */
 
 test.describe('Video Streaming Tests', () => {
+  // Configure retries for this test suite due to external service variability
+  test.describe.configure({ retries: 2 });
+
   test('should load YouTube homepage', async ({ page }) => {
     await page.goto('https://www.youtube.com/', { waitUntil: 'domcontentloaded' });
 

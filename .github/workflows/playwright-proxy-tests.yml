@@ -68,6 +68,17 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
+      - name: Validate BITPING_API_KEY
+        run: |
+          if [ -z "$BITPING_API_KEY" ]; then
+            echo "Error: BITPING_API_KEY secret is not set"
+            echo "Please add BITPING_API_KEY to repository secrets"
+            exit 1
+          fi
+          echo "BITPING_API_KEY is configured"
+        env:
+          BITPING_API_KEY: ${{ secrets.BITPING_API_KEY }}
+
       - name: Cache Cargo dependencies
         uses: actions/cache@v4
         with:
@@ -81,17 +92,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-playwright-
             ${{ runner.os }}-cargo-
-
-      - name: Validate BITPING_API_KEY
-        run: |
-          if [ -z "$BITPING_API_KEY" ]; then
-            echo "Error: BITPING_API_KEY secret is not set"
-            echo "Please add BITPING_API_KEY to repository secrets"
-            exit 1
-          fi
-          echo "BITPING_API_KEY is configured"
-        env:
-          BITPING_API_KEY: ${{ secrets.BITPING_API_KEY }}
 
       - name: Build p2proxy
         run: cargo build --release --bin p2proxy
@@ -119,26 +119,45 @@ jobs:
           PROXY_PID=$!
           echo "PROXY_PID=$PROXY_PID" >> $GITHUB_ENV
 
-          # Wait for proxy to be ready (check if SOCKS5 port is listening)
-          echo "Waiting for proxy to start..."
-          for i in {1..30}; do
-            # Use bash's built-in TCP check (portable, no external dependencies)
+          # Wait for proxy to be fully initialized
+          echo "Waiting for proxy to start and authenticate..."
+          PROXY_READY=false
+
+          for i in {1..60}; do
+            # Check if SOCKS5 port is listening
             if timeout 1 bash -c 'cat < /dev/null > /dev/tcp/localhost/1080' 2>/dev/null; then
-              echo "Proxy is ready!"
-              break
+              echo "Port 1080 is listening"
+
+              # Check logs for successful authentication or ready state
+              if grep -q "Authenticated\|Connected to peer\|Server listening\|Ready" logs/p2proxy.log 2>/dev/null; then
+                echo "Proxy is fully initialized and ready!"
+                PROXY_READY=true
+                break
+              else
+                echo "Port is open but waiting for authentication/peer connection..."
+              fi
+            else
+              echo "Attempt $i/60: Port 1080 not yet listening..."
             fi
-            if [ $i -eq 30 ]; then
-              echo "Proxy failed to start within 30 seconds"
+
+            # Check for fatal errors in logs
+            if grep -qi "error.*fatal\|panic\|failed to authenticate" logs/p2proxy.log 2>/dev/null; then
+              echo "Fatal error detected in proxy logs:"
               cat logs/p2proxy.log
               exit 1
             fi
-            echo "Attempt $i/30: Proxy not ready yet..."
+
             sleep 1
           done
 
-          # Give it a few more seconds to fully initialize
-          echo "Proxy started, waiting for full initialization..."
-          sleep 5
+          if [ "$PROXY_READY" != "true" ]; then
+            echo "Proxy failed to fully initialize within 60 seconds"
+            echo "=== Proxy Logs ==="
+            cat logs/p2proxy.log
+            exit 1
+          fi
+
+          echo "Proxy is ready for testing"
         env:
           BITPING_API_KEY: ${{ secrets.BITPING_API_KEY }}
           RUST_LOG: info

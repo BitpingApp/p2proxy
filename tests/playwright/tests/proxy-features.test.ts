@@ -107,29 +107,32 @@ test.describe('Proxy Feature Tests', () => {
       },
     });
 
-    const pages = await Promise.all([
-      context.newPage(),
-      context.newPage(),
-      context.newPage(),
-    ]);
+    try {
+      const pages = await Promise.all([
+        context.newPage(),
+        context.newPage(),
+        context.newPage(),
+      ]);
 
-    // Navigate to different sites concurrently
-    const navigations = [
-      pages[0].goto('https://www.wikipedia.org/', { waitUntil: 'domcontentloaded' }),
-      pages[1].goto('https://www.github.com/', { waitUntil: 'domcontentloaded' }),
-      pages[2].goto('https://www.bbc.com/', { waitUntil: 'domcontentloaded' }),
-    ];
+      // Navigate to different sites concurrently
+      const navigations = [
+        pages[0].goto('https://www.wikipedia.org/', { waitUntil: 'domcontentloaded' }),
+        pages[1].goto('https://www.github.com/', { waitUntil: 'domcontentloaded' }),
+        pages[2].goto('https://www.bbc.com/', { waitUntil: 'domcontentloaded' }),
+      ];
 
-    await Promise.all(navigations);
+      await Promise.all(navigations);
 
-    // Verify all pages loaded
-    for (const page of pages) {
-      const hasContent = await page.locator('body').isVisible();
-      expect(hasContent).toBeTruthy();
-      await page.close();
+      // Verify all pages loaded
+      for (const page of pages) {
+        const hasContent = await page.locator('body').isVisible();
+        expect(hasContent).toBeTruthy();
+        await page.close();
+      }
+    } finally {
+      // Ensure context is always closed, even if test fails
+      await context.close();
     }
-
-    await context.close();
   });
 
   test('should handle connection pooling', async ({ page }) => {
