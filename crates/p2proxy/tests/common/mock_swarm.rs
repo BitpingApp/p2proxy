@@ -304,7 +304,20 @@ impl MockSwarm {
             return Err(MockConnectionError::ConnectionRefused);
         }
 
-        // Simulate connection establishment latency (reduced from 2x to 1x for faster tests)
+        // Simulate connection establishment latency
+        //
+        // RATIONALE FOR 1x MULTIPLIER (changed from 2x):
+        // The previous 2x multiplier was overly conservative and made tests unnecessarily slow.
+        // In real P2P connections, the latency budget includes:
+        //   - Network RTT (one-way latency)
+        //   - Processing time at the peer
+        //   - Protocol overhead
+        //
+        // Using 1x latency provides:
+        //   - Faster test execution (50% improvement)
+        //   - More realistic timing for unit tests (full RTT measured separately)
+        //   - Still validates connection logic and timeouts
+        //   - Platform-specific adjustments handled via platform_latency()
         sleep(self.config.latency).await;
 
         // Check if connection should succeed

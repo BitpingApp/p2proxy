@@ -125,20 +125,11 @@ async fn test_round_trip_time() {
 
     // RTT in mock includes latency + jitter (one way in the respond_to_query)
     // With 10ms latency + up to 1ms jitter = ~10-12ms (macOS may be higher due to scheduler overhead)
-    let max_median = if is_macos() {
-        Duration::from_millis(20) // macOS has higher overhead
-    } else {
-        Duration::from_millis(15)
-    };
-    let max_p95 = if is_macos() {
-        Duration::from_millis(25)
-    } else {
-        Duration::from_millis(18)
-    };
+    let thresholds = rtt_thresholds();
 
     assert!(stats.median >= Duration::from_millis(9), "Median RTT too low");
-    assert!(stats.median <= max_median, "Median RTT too high: {:?} > {:?}", stats.median, max_median);
-    assert!(stats.p95 <= max_p95, "p95 RTT too high: {:?} > {:?}", stats.p95, max_p95);
+    assert!(stats.median <= thresholds.max_median, "Median RTT too high: {:?} > {:?}", stats.median, thresholds.max_median);
+    assert!(stats.p95 <= thresholds.max_p95, "p95 RTT too high: {:?} > {:?}", stats.p95, thresholds.max_p95);
 
     // Test with high latency (200ms)
     let high_latency_config = MockPeerConfig {
@@ -170,14 +161,10 @@ async fn test_round_trip_time() {
     println!("  p99: {:?}", high_stats.p99);
 
     // RTT should be approximately 200ms + jitter (macOS may have higher overhead)
-    let high_max = if is_macos() {
-        Duration::from_millis(220)
-    } else {
-        Duration::from_millis(210)
-    };
+    let high_thresholds = high_latency_rtt_thresholds();
 
     assert!(high_stats.median >= Duration::from_millis(195), "High latency median too low");
-    assert!(high_stats.median <= high_max, "High latency median too high: {:?} > {:?}", high_stats.median, high_max);
+    assert!(high_stats.median <= high_thresholds.max_median, "High latency median too high: {:?} > {:?}", high_stats.median, high_thresholds.max_median);
 }
 
 /// Test 2: Connection establishment latency
@@ -215,20 +202,11 @@ async fn test_connection_establishment_latency() {
 
     // Connection establishment includes 2x latency (dial + response)
     // Expected: ~100ms (50ms * 2)
-    let conn_max_median = if is_macos() {
-        Duration::from_millis(150)
-    } else {
-        Duration::from_millis(120)
-    };
-    let conn_max_p95 = if is_macos() {
-        Duration::from_millis(200)
-    } else {
-        Duration::from_millis(150)
-    };
+    let thresholds = connection_latency_thresholds();
 
     assert!(stats.median >= Duration::from_millis(90), "Connection latency too low");
-    assert!(stats.median <= conn_max_median, "Connection latency too high: {:?} > {:?}", stats.median, conn_max_median);
-    assert!(stats.p95 <= conn_max_p95, "p95 connection latency too high: {:?} > {:?}", stats.p95, conn_max_p95);
+    assert!(stats.median <= thresholds.max_median, "Connection latency too high: {:?} > {:?}", stats.median, thresholds.max_median);
+    assert!(stats.p95 <= thresholds.max_p95, "p95 connection latency too high: {:?} > {:?}", stats.p95, thresholds.max_p95);
 }
 
 /// Test 3: SOCKS5 handshake latency
@@ -275,20 +253,11 @@ async fn test_socks5_handshake_latency() {
 
     // SOCKS5 handshake is 2 queries = 2x latency per query = ~20-24ms total
     // With jitter (up to 2ms per query), expect some variation
-    let socks5_max_median = if is_macos() {
-        Duration::from_millis(40)
-    } else {
-        Duration::from_millis(30)
-    };
-    let socks5_max_p95 = if is_macos() {
-        Duration::from_millis(50)
-    } else {
-        Duration::from_millis(35)
-    };
+    let thresholds = socks5_handshake_thresholds();
 
     assert!(stats.median >= Duration::from_millis(20), "SOCKS5 handshake too fast");
-    assert!(stats.median <= socks5_max_median, "SOCKS5 handshake too slow: {:?} > {:?}", stats.median, socks5_max_median);
-    assert!(stats.p95 <= socks5_max_p95, "p95 SOCKS5 handshake too high: {:?} > {:?}", stats.p95, socks5_max_p95);
+    assert!(stats.median <= thresholds.max_median, "SOCKS5 handshake too slow: {:?} > {:?}", stats.median, thresholds.max_median);
+    assert!(stats.p95 <= thresholds.max_p95, "p95 SOCKS5 handshake too high: {:?} > {:?}", stats.p95, thresholds.max_p95);
 }
 
 /// Test 4: First-byte latency
@@ -336,20 +305,11 @@ async fn test_first_byte_latency() {
 
     // First byte latency = one-way latency + processing + jitter
     // Expected: ~50ms + jitter (up to 5ms)
-    let fb_max_median = if is_macos() {
-        Duration::from_millis(80)
-    } else {
-        Duration::from_millis(65)
-    };
-    let fb_max_p95 = if is_macos() {
-        Duration::from_millis(100)
-    } else {
-        Duration::from_millis(80)
-    };
+    let thresholds = first_byte_latency_thresholds();
 
     assert!(stats.median >= Duration::from_millis(45), "First byte too fast");
-    assert!(stats.median <= fb_max_median, "First byte too slow: {:?} > {:?}", stats.median, fb_max_median);
-    assert!(stats.p95 <= fb_max_p95, "p95 first byte latency too high: {:?} > {:?}", stats.p95, fb_max_p95);
+    assert!(stats.median <= thresholds.max_median, "First byte too slow: {:?} > {:?}", stats.median, thresholds.max_median);
+    assert!(stats.p95 <= thresholds.max_p95, "p95 first byte latency too high: {:?} > {:?}", stats.p95, thresholds.max_p95);
 }
 
 /// Test 5: Packet timing variance (Jitter measurement)
