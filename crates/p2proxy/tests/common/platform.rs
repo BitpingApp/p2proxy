@@ -8,18 +8,11 @@ use std::time::Duration;
 // Platform multiplier constants with rationale
 //
 // These multipliers account for platform-specific scheduling and timing overhead:
-// - macOS: Higher overhead due to Mach kernel scheduling (1x = full latency)
 // - Linux: Lower overhead with efficient scheduler (0.5x = half latency)
-// - Windows: Conservative default similar to macOS (1x = full latency)
-
-/// macOS uses full base latency due to higher scheduler overhead
-const MACOS_LATENCY_MULTIPLIER: f64 = 1.0;
+// - macOS/Windows: Higher overhead, use full latency (1x)
 
 /// Linux can use reduced latency (50% of base) due to efficient scheduler
 const LINUX_LATENCY_DIVISOR: u64 = 2;
-
-/// Windows uses full base latency (conservative default)
-const WINDOWS_LATENCY_MULTIPLIER: f64 = 1.0;
 
 /// Minimum latency in milliseconds to prevent zero-duration operations
 const MIN_LATENCY_MS: u64 = 1;
@@ -110,14 +103,8 @@ pub fn platform_latency(base_ms: u64) -> Duration {
     let latency_ms = if is_linux() {
         // Linux can use reduced latency for faster execution
         (base_ms / LINUX_LATENCY_DIVISOR).max(MIN_LATENCY_MS)
-    } else if is_macos() {
-        // macOS needs full latency due to higher overhead
-        base_ms.max(MIN_LATENCY_MS)
-    } else if is_windows() {
-        // Windows uses conservative default (full latency)
-        base_ms.max(MIN_LATENCY_MS)
     } else {
-        // Other platforms: use conservative default
+        // macOS, Windows, and other platforms use full latency
         base_ms.max(MIN_LATENCY_MS)
     };
 
@@ -146,15 +133,12 @@ pub fn platform_latency(base_ms: u64) -> Duration {
 /// tokio::time::sleep(sleep_dur).await;
 /// ```
 pub fn platform_sleep(base_ms: u64) -> Duration {
-    if is_macos() {
-        // macOS may need slightly more time for server startup
-        Duration::from_millis(base_ms.max(10))
-    } else if is_windows() {
-        // Windows also needs conservative defaults
-        Duration::from_millis(base_ms.max(10))
-    } else {
+    if is_linux() {
         // Linux can use minimal delays
         Duration::from_millis(base_ms.max(5))
+    } else {
+        // macOS, Windows, and other platforms need more time for server startup
+        Duration::from_millis(base_ms.max(10))
     }
 }
 
@@ -341,10 +325,11 @@ mod tests {
     fn test_platform_latency() {
         let latency = platform_latency(10);
 
-        if is_macos() {
-            assert_eq!(latency, Duration::from_millis(10));
-        } else {
+        if is_linux() {
             assert_eq!(latency, Duration::from_millis(5));
+        } else {
+            // macOS, Windows, and other platforms use full latency
+            assert_eq!(latency, Duration::from_millis(10));
         }
     }
 
@@ -352,21 +337,16 @@ mod tests {
     fn test_platform_sleep() {
         let sleep_dur = platform_sleep(10);
 
-        if is_macos() {
-            assert_eq!(sleep_dur, Duration::from_millis(10));
-        } else if is_windows() {
-            assert_eq!(sleep_dur, Duration::from_millis(10));
-        } else {
-            // Linux: base_ms.max(5) = 10.max(5) = 10
-            assert_eq!(sleep_dur, Duration::from_millis(10));
-        }
+        // All platforms return 10ms for platform_sleep(10) since it's above all minimums
+        assert_eq!(sleep_dur, Duration::from_millis(10));
 
         // Test minimum enforcement
         let min_sleep = platform_sleep(1);
-        if is_macos() || is_windows() {
-            assert_eq!(min_sleep, Duration::from_millis(10)); // Enforces 10ms minimum
-        } else {
+        if is_linux() {
             assert_eq!(min_sleep, Duration::from_millis(5)); // Enforces 5ms minimum
+        } else {
+            // macOS, Windows, and other platforms enforce 10ms minimum
+            assert_eq!(min_sleep, Duration::from_millis(10));
         }
     }
 }
