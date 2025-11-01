@@ -1,31 +1,26 @@
 // wireguard.rs
-use bitping_tcp_proxy::{
-    bandwidth_reporter::BandwidthReport, DataPhaseMessage, ProxySession, TargetAddr,
-    TCP_PROXY_PROTOCOL,
-};
-use color_eyre::eyre::Result;
+use bitping_tcp_proxy::bandwidth_reporter::BandwidthReport;
+use color_eyre::eyre::{Context as _, Result};
+use dashmap::DashMap;
 use futures::{AsyncReadExt, AsyncWriteExt, Stream};
-use libp2p::{core::SignedEnvelope, identity::Keypair, PeerId, Stream as LibP2pStream};
-use libp2p_stream as p2p_stream;
-use crate::stream_pool::{PoolConfig, StreamPool};
+use libp2p::{identity::Keypair, PeerId, Stream as LibP2pStream};
+use crate::stream_pool::StreamPool;
 use metrics::{counter, gauge, histogram};
 use std::{
     collections::HashMap,
-    io,
     net::SocketAddr,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
     time::{Duration, Instant},
 };
+use thiserror::Error;
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     net::UdpSocket,
-    select,
     sync::{
         mpsc::{self, Receiver, Sender},
-        oneshot,
-        RwLock,
+        oneshot, Semaphore,
     },
     time::timeout,
 };
@@ -37,14 +32,55 @@ use models::config::Server;
 // WireGuard MTU-based buffer size (typical WireGuard packet max)
 const UDP_BUF_SIZE: usize = 1500;
 
-// Session inactivity timeout (WireGuard keepalive is typically 25s)
-const SESSION_TIMEOUT: Duration = Duration::from_secs(180); // 3 minutes
+// Session inactivity timeout (reduced from 3 minutes to 90 seconds)
+const DEFAULT_SESSION_TIMEOUT: Duration = Duration::from_secs(90);
 
-// WireGuard protocol constants
+// Maximum number of concurrent sessions per server
+const MAX_SESSIONS_PER_SERVER: usize = 10000;
+
+// Rate limiting: maximum packets per second per client
+const MAX_PACKETS_PER_SEC_PER_CLIENT: u32 = 1000;
+const RATE_LIMIT_REFILL_INTERVAL: Duration = Duration::from_millis(100);
+
+// WireGuard protocol constants and packet size validation
 const WIREGUARD_MESSAGE_HANDSHAKE_INITIATION: u8 = 1;
 const WIREGUARD_MESSAGE_HANDSHAKE_RESPONSE: u8 = 2;
 const WIREGUARD_MESSAGE_COOKIE_REPLY: u8 = 3;
 const WIREGUARD_MESSAGE_DATA: u8 = 4;
+
+// Minimum packet sizes for each WireGuard message type
+const MIN_HANDSHAKE_INITIATION_SIZE: usize = 148;
+const MIN_HANDSHAKE_RESPONSE_SIZE: usize = 92;
+const MIN_COOKIE_REPLY_SIZE: usize = 64;
+const MIN_DATA_PACKET_SIZE: usize = 32;
+
+/// WireGuard-specific error types
+#[derive(Error, Debug)]
+pub enum WireguardError {
+    #[error("Session not found for address {0}")]
+    SessionNotFound(SocketAddr),
+
+    #[error("Maximum session limit ({0}) reached")]
+    MaxSessionsReached(usize),
+
+    #[error("Rate limit exceeded for client {0}")]
+    RateLimitExceeded(SocketAddr),
+
+    #[error("Invalid packet size {size} for message type {msg_type}")]
+    InvalidPacketSize { msg_type: u8, size: usize },
+
+    #[error("Failed to acquire stream: {0}")]
+    StreamAcquisitionFailed(String),
+
+    #[error("Failed to write to stream: {0}")]
+    StreamWriteFailed(String),
+
+    #[error("Failed to read from stream: {0}")]
+    StreamReadFailed(String),
+
+    #[error("UDP socket error: {0}")]
+    UdpSocketError(String),
+}
 
 // Stream message types that will be emitted
 pub enum WireguardStreamMessage {
@@ -102,6 +138,44 @@ impl Stream for WireguardProxyStream {
     }
 }
 
+/// Token bucket for rate limiting
+struct RateLimiter {
+    tokens: Arc<Semaphore>,
+    last_refill: Arc<tokio::sync::Mutex<Instant>>,
+}
+
+impl RateLimiter {
+    fn new(max_tokens: usize) -> Self {
+        Self {
+            tokens: Arc::new(Semaphore::new(max_tokens)),
+            last_refill: Arc::new(tokio::sync::Mutex::new(Instant::now())),
+        }
+    }
+
+    async fn try_acquire(&self) -> bool {
+        // Refill tokens based on elapsed time
+        {
+            let mut last_refill = self.last_refill.lock().await;
+            let elapsed = last_refill.elapsed();
+            if elapsed >= RATE_LIMIT_REFILL_INTERVAL {
+                let tokens_to_add = (elapsed.as_millis() as u32 * MAX_PACKETS_PER_SEC_PER_CLIENT) / 1000;
+                if tokens_to_add > 0 {
+                    // Add tokens up to the maximum
+                    for _ in 0..tokens_to_add.min(MAX_PACKETS_PER_SEC_PER_CLIENT) {
+                        if self.tokens.available_permits() < MAX_PACKETS_PER_SEC_PER_CLIENT as usize {
+                            self.tokens.add_permits(1);
+                        }
+                    }
+                    *last_refill = Instant::now();
+                }
+            }
+        }
+
+        // Try to acquire a token (non-blocking)
+        self.tokens.try_acquire().is_ok()
+    }
+}
+
 /// Represents a persistent WireGuard session for a specific client
 struct WireguardSession {
     session_id: Uuid,
@@ -111,22 +185,77 @@ struct WireguardSession {
     last_activity: Instant,
     incoming_bytes: u64,
     outgoing_bytes: u64,
+    rate_limiter: RateLimiter,
+    /// Handle to the background receive task for this session
+    _recv_task_handle: tokio::task::JoinHandle<()>,
 }
 
 impl WireguardSession {
     fn new(
         client_addr: SocketAddr,
         peer_id: PeerId,
-        stream: LibP2pStream,
+        mut stream: LibP2pStream,
+        socket: Arc<UdpSocket>,
+        sender: Sender<WireguardStreamMessage>,
     ) -> Self {
+        let session_id = Uuid::new_v4();
+        let rate_limiter = RateLimiter::new(MAX_PACKETS_PER_SEC_PER_CLIENT as usize);
+
+        // Spawn a dedicated receive task for this session
+        let recv_session_id = session_id;
+        let recv_client_addr = client_addr;
+        let recv_sender = sender.clone();
+        let recv_task_handle = tokio::spawn(async move {
+            let mut buf = vec![0u8; UDP_BUF_SIZE];
+
+            loop {
+                match timeout(Duration::from_millis(100), stream.read(&mut buf)).await {
+                    Ok(Ok(n)) if n > 0 => {
+                        counter!("p2proxy_wireguard_bytes_sent_total").increment(n as u64);
+                        counter!("p2proxy_wireguard_responses_received_total").increment(1);
+
+                        // Send response back to client via UDP
+                        if let Err(e) = socket.send_to(&buf[..n], recv_client_addr).await {
+                            error!("Failed to send response to client {}: {}", recv_client_addr, e);
+                            counter!("p2proxy_wireguard_send_errors_total").increment(1);
+                            break;
+                        } else {
+                            let _ = recv_sender.send(WireguardStreamMessage::DataTransferred {
+                                session_id: recv_session_id,
+                                direction: DataDirection::Incoming,
+                                bytes: n,
+                            }).await;
+                        }
+                    }
+                    Ok(Ok(_)) => {
+                        debug!("Stream EOF for session {}", recv_session_id);
+                        break; // EOF
+                    }
+                    Ok(Err(e)) => {
+                        error!("Read error on session {}: {}", recv_session_id, e);
+                        counter!("p2proxy_wireguard_read_errors_total").increment(1);
+                        break;
+                    }
+                    Err(_) => {
+                        // Timeout - continue polling
+                        continue;
+                    }
+                }
+            }
+
+            debug!("Receive task terminated for session {}", recv_session_id);
+        });
+
         Self {
-            session_id: Uuid::new_v4(),
+            session_id,
             client_addr,
             peer_id,
             stream,
             last_activity: Instant::now(),
             incoming_bytes: 0,
             outgoing_bytes: 0,
+            rate_limiter,
+            _recv_task_handle: recv_task_handle,
         }
     }
 
@@ -135,68 +264,93 @@ impl WireguardSession {
     }
 
     fn is_expired(&self) -> bool {
-        self.last_activity.elapsed() > SESSION_TIMEOUT
+        self.last_activity.elapsed() > DEFAULT_SESSION_TIMEOUT
+    }
+
+    async fn check_rate_limit(&self) -> Result<(), WireguardError> {
+        if !self.rate_limiter.try_acquire().await {
+            Err(WireguardError::RateLimitExceeded(self.client_addr))
+        } else {
+            Ok(())
+        }
     }
 }
 
 /// Manages WireGuard sessions with session affinity
 struct SessionManager {
-    sessions: Arc<RwLock<HashMap<SocketAddr, WireguardSession>>>,
+    sessions: Arc<DashMap<SocketAddr, WireguardSession>>,
     stream_pool: Arc<StreamPool>,
+    socket: Arc<UdpSocket>,
+    sender: Sender<WireguardStreamMessage>,
 }
 
 impl SessionManager {
-    fn new(stream_pool: Arc<StreamPool>) -> Self {
+    fn new(
+        stream_pool: Arc<StreamPool>,
+        socket: Arc<UdpSocket>,
+        sender: Sender<WireguardStreamMessage>,
+    ) -> Self {
         Self {
-            sessions: Arc::new(RwLock::new(HashMap::new())),
+            sessions: Arc::new(DashMap::new()),
             stream_pool,
+            socket,
+            sender,
         }
     }
 
-    /// Get or create a session for a client address
+    /// Get or create a session for a client address using double-checked locking
     async fn get_or_create_session(
         &self,
         client_addr: SocketAddr,
         peer_id: PeerId,
-    ) -> Result<Uuid, String> {
-        // First check if session exists
-        {
-            let mut sessions = self.sessions.write().await;
-
-            // Clean up expired sessions
-            let expired: Vec<SocketAddr> = sessions
-                .iter()
-                .filter(|(_, session)| session.is_expired())
-                .map(|(addr, _)| *addr)
-                .collect();
-
-            for addr in expired {
-                if let Some(session) = sessions.remove(&addr) {
-                    debug!("Cleaning up expired session {} for {}", session.session_id, addr);
-                    counter!("p2proxy_wireguard_sessions_expired_total").increment(1);
-                }
-            }
-
-            // Check for existing session
-            if let Some(session) = sessions.get_mut(&client_addr) {
+    ) -> Result<Uuid, WireguardError> {
+        // Fast path: check if session exists (read-only access)
+        if let Some(mut session) = self.sessions.get_mut(&client_addr) {
+            if !session.is_expired() {
                 session.touch();
                 return Ok(session.session_id);
             }
+            // Session expired, will be recreated below
         }
 
-        // Need to create new session
+        // Check session limit before creating new session
+        if self.sessions.len() >= MAX_SESSIONS_PER_SERVER {
+            return Err(WireguardError::MaxSessionsReached(MAX_SESSIONS_PER_SERVER));
+        }
+
         debug!("Creating new WireGuard session for {}", client_addr);
 
+        // Acquire stream (may be slow, don't hold any locks during this)
         let stream = self.stream_pool
             .acquire_stream(peer_id)
             .await
-            .map_err(|e| format!("Failed to acquire stream: {}", e))?;
+            .map_err(|e| WireguardError::StreamAcquisitionFailed(e.to_string()))?;
 
-        let mut sessions = self.sessions.write().await;
-        let session = WireguardSession::new(client_addr, peer_id, stream);
+        // Double-checked locking: check again if session was created while we were acquiring stream
+        if let Some(mut session) = self.sessions.get_mut(&client_addr) {
+            if !session.is_expired() {
+                // Another task created the session, return it
+                // The stream we acquired will be dropped and returned to pool
+                drop(stream);
+                session.touch();
+                return Ok(session.session_id);
+            }
+            // Session exists but is expired, remove it
+            drop(session); // Release reference before removing
+            self.sessions.remove(&client_addr);
+        }
+
+        // Create new session with dedicated receive task
+        let session = WireguardSession::new(
+            client_addr,
+            peer_id,
+            stream,
+            self.socket.clone(),
+            self.sender.clone(),
+        );
         let session_id = session.session_id;
 
-        sessions.insert(client_addr, session);
+        self.sessions.insert(client_addr, session);
         counter!("p2proxy_wireguard_sessions_created_total").increment(1);
         gauge!("p2proxy_wireguard_sessions_active").increment(1.0);
 
@@ -208,54 +362,29 @@ impl SessionManager {
         &self,
         client_addr: SocketAddr,
         data: &[u8],
-    ) -> Result<usize, String> {
-        let mut sessions = self.sessions.write().await;
+    ) -> Result<usize, WireguardError> {
+        let mut session = self.sessions.get_mut(&client_addr)
+            .ok_or(WireguardError::SessionNotFound(client_addr))?;
 
-        let session = sessions.get_mut(&client_addr)
-            .ok_or_else(|| "Session not found".to_string())?;
+        // Check rate limit
+        session.check_rate_limit().await?;
 
         session.touch();
 
         session.stream.write_all(data).await
-            .map_err(|e| format!("Failed to write to stream: {}", e))?;
+            .map_err(|e| WireguardError::StreamWriteFailed(e.to_string()))?;
 
         session.stream.flush().await
-            .map_err(|e| format!("Failed to flush stream: {}", e))?;
+            .map_err(|e| WireguardError::StreamWriteFailed(e.to_string()))?;
 
         session.outgoing_bytes += data.len() as u64;
 
         Ok(data.len())
     }
 
-    /// Receive data from a client's session (non-blocking)
-    async fn recv_from_peer(
-        &self,
-        client_addr: SocketAddr,
-        buf: &mut [u8],
-    ) -> Result<usize, String> {
-        let mut sessions = self.sessions.write().await;
-
-        let session = sessions.get_mut(&client_addr)
-            .ok_or_else(|| "Session not found".to_string())?;
-
-        session.touch();
-
-        // Non-blocking read with short timeout
-        match timeout(Duration::from_millis(10), session.stream.read(buf)).await {
-            Ok(Ok(n)) => {
-                session.incoming_bytes += n as u64;
-                Ok(n)
-            }
-            Ok(Err(e)) => Err(format!("Read error: {}", e)),
-            Err(_) => Ok(0), // Timeout is not an error for UDP
-        }
-    }
-
     /// Close a session and return stream to pool
     async fn close_session(&self, client_addr: SocketAddr) -> Option<(PeerId, u64, u64)> {
-        let mut sessions = self.sessions.write().await;
-
-        if let Some(session) = sessions.remove(&client_addr) {
+        if let Some((_, session)) = self.sessions.remove(&client_addr) {
             let peer_id = session.peer_id;
             let incoming = session.incoming_bytes;
             let outgoing = session.outgoing_bytes;
@@ -281,21 +410,37 @@ impl SessionManager {
             loop {
                 tokio::time::sleep(Duration::from_secs(30)).await;
 
-                let expired: Vec<SocketAddr> = {
-                    let sessions = self.sessions.read().await;
-                    sessions
-                        .iter()
-                        .filter(|(_, session)| session.is_expired())
-                        .map(|(addr, _)| *addr)
-                        .collect()
-                };
+                let expired: Vec<SocketAddr> = self.sessions
+                    .iter()
+                    .filter(|entry| entry.value().is_expired())
+                    .map(|entry| *entry.key())
+                    .collect();
 
                 for addr in expired {
+                    debug!("Cleaning up expired session for {}", addr);
                     self.close_session(addr).await;
+                    counter!("p2proxy_wireguard_sessions_expired_total").increment(1);
                 }
             }
         });
     }
+}
+
+/// Validate WireGuard packet size based on message type
+fn validate_packet_size(message_type: u8, size: usize) -> Result<(), WireguardError> {
+    let min_size = match message_type {
+        WIREGUARD_MESSAGE_HANDSHAKE_INITIATION => MIN_HANDSHAKE_INITIATION_SIZE,
+        WIREGUARD_MESSAGE_HANDSHAKE_RESPONSE => MIN_HANDSHAKE_RESPONSE_SIZE,
+        WIREGUARD_MESSAGE_COOKIE_REPLY => MIN_COOKIE_REPLY_SIZE,
+        WIREGUARD_MESSAGE_DATA => MIN_DATA_PACKET_SIZE,
+        _ => return Ok(()), // Unknown message type, skip validation
+    };
+
+    if size < min_size {
+        return Err(WireguardError::InvalidPacketSize { msg_type: message_type, size });
+    }
+
+    Ok(())
 }
 
 /// Creates a WireGuard proxy server that listens for WireGuard connections
@@ -311,6 +456,7 @@ impl SessionManager {
 /// - Complete WireGuard handshake state machine
 ///
 /// For full WireGuard VPN functionality, additional components are required.
+/// See WIREGUARD_LIMITATIONS.md for details.
 ///
 /// # Arguments
 ///
@@ -333,17 +479,26 @@ pub async fn create_wireguard_proxy_stream(
     stream_pool: Arc<StreamPool>,
     sender: mpsc::Sender<WireguardStreamMessage>,
 ) -> Result<()> {
-    let socket = Arc::new(UdpSocket::bind(SocketAddr::from(([0, 0, 0, 0], server_config.port))).await?);
+    let socket = Arc::new(
+        UdpSocket::bind(SocketAddr::from(([0, 0, 0, 0], server_config.port)))
+            .await
+            .with_context(|| format!("Failed to bind WireGuard UDP socket on port {}", server_config.port))?
+    );
+
     counter!("p2proxy_wireguard_server_started_total").increment(1);
     gauge!("p2proxy_wireguard_servers_active").increment(1.0);
     info!("WireGuard proxy listening on UDP port {}", server_config.port);
 
-    let session_manager = Arc::new(SessionManager::new(stream_pool.clone()));
+    let session_manager = Arc::new(SessionManager::new(
+        stream_pool.clone(),
+        socket.clone(),
+        sender.clone(),
+    ));
 
     // Start background cleanup task
     session_manager.clone().start_cleanup_task();
 
-    // Spawn receive task
+    // Spawn main receive task (handles incoming UDP packets from clients)
     let recv_socket = socket.clone();
     let recv_manager = session_manager.clone();
     let recv_sender = sender.clone();
@@ -360,8 +515,23 @@ pub async fn create_wireguard_proxy_stream(
                     counter!("p2proxy_wireguard_packets_total").increment(1);
                     counter!("p2proxy_wireguard_bytes_received_total").increment(len as u64);
 
-                    // Identify WireGuard message type
+                    // Validate packet has at least message type byte
+                    if len < 1 {
+                        warn!("Received packet too small from {}: {} bytes", addr, len);
+                        counter!("p2proxy_wireguard_invalid_packet_total").increment(1);
+                        continue;
+                    }
+
+                    // Identify and validate WireGuard message type
                     let message_type = buf[0];
+
+                    // Validate packet size
+                    if let Err(e) = validate_packet_size(message_type, len) {
+                        warn!("Invalid packet from {}: {}", addr, e);
+                        counter!("p2proxy_wireguard_invalid_packet_total").increment(1);
+                        continue;
+                    }
+
                     match message_type {
                         WIREGUARD_MESSAGE_HANDSHAKE_INITIATION => {
                             debug!("WireGuard handshake initiation from {}", addr);
@@ -392,7 +562,7 @@ pub async fn create_wireguard_proxy_stream(
                             counter!("p2proxy_wireguard_session_errors_total").increment(1);
                             let _ = recv_sender.send(WireguardStreamMessage::Error {
                                 session_id: None,
-                                error: e,
+                                error: e.to_string(),
                                 stage: SessionStage::PeerConnection,
                             }).await;
                             continue;
@@ -412,17 +582,25 @@ pub async fn create_wireguard_proxy_stream(
                             }).await;
                         }
                         Err(e) => {
-                            error!("Failed to forward packet from {} to peer: {}", addr, e);
-                            counter!("p2proxy_wireguard_write_errors_total").increment(1);
+                            match &e {
+                                WireguardError::RateLimitExceeded(_) => {
+                                    debug!("Rate limit exceeded for {}", addr);
+                                    counter!("p2proxy_wireguard_rate_limited_total").increment(1);
+                                }
+                                _ => {
+                                    error!("Failed to forward packet from {} to peer: {}", addr, e);
+                                    counter!("p2proxy_wireguard_write_errors_total").increment(1);
 
-                            let _ = recv_sender.send(WireguardStreamMessage::Error {
-                                session_id: Some(session_id),
-                                error: e.clone(),
-                                stage: SessionStage::DataTransfer,
-                            }).await;
+                                    let _ = recv_sender.send(WireguardStreamMessage::Error {
+                                        session_id: Some(session_id),
+                                        error: e.to_string(),
+                                        stage: SessionStage::DataTransfer,
+                                    }).await;
 
-                            // Close failed session
-                            recv_manager.close_session(addr).await;
+                                    // Close failed session (except for rate limit errors)
+                                    recv_manager.close_session(addr).await;
+                                }
+                            }
                         }
                     }
                 }
@@ -437,60 +615,6 @@ pub async fn create_wireguard_proxy_stream(
                     }).await;
                 }
             }
-        }
-    });
-
-    // Spawn send task - reads from peer streams and sends back to clients
-    let send_socket = socket.clone();
-    let send_manager = session_manager.clone();
-    let send_sender = sender.clone();
-    tokio::spawn(async move {
-        let mut buf = vec![0u8; UDP_BUF_SIZE];
-
-        loop {
-            // Poll all active sessions for incoming data
-            let clients: Vec<SocketAddr> = {
-                let sessions = send_manager.sessions.read().await;
-                sessions.keys().copied().collect()
-            };
-
-            for client_addr in clients {
-                match send_manager.recv_from_peer(client_addr, &mut buf).await {
-                    Ok(0) => continue, // No data available
-                    Ok(n) => {
-                        counter!("p2proxy_wireguard_bytes_sent_total").increment(n as u64);
-                        counter!("p2proxy_wireguard_responses_received_total").increment(1);
-
-                        // Send response back to client
-                        if let Err(e) = send_socket.send_to(&buf[..n], client_addr).await {
-                            error!("Failed to send response to client {}: {}", client_addr, e);
-                            counter!("p2proxy_wireguard_send_errors_total").increment(1);
-                        } else {
-                            // Get session ID for event
-                            let session_id = {
-                                let sessions = send_manager.sessions.read().await;
-                                sessions.get(&client_addr).map(|s| s.session_id)
-                            };
-
-                            if let Some(session_id) = session_id {
-                                let _ = send_sender.send(WireguardStreamMessage::DataTransferred {
-                                    session_id,
-                                    direction: DataDirection::Incoming,
-                                    bytes: n,
-                                }).await;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        error!("Failed to read from peer for client {}: {}", client_addr, e);
-                        counter!("p2proxy_wireguard_read_errors_total").increment(1);
-                        send_manager.close_session(client_addr).await;
-                    }
-                }
-            }
-
-            // Small sleep to prevent busy-waiting
-            tokio::time::sleep(Duration::from_millis(1)).await;
         }
     });
 

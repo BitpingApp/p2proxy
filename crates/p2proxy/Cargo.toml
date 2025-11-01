@@ -35,6 +35,7 @@ libp2p-stream = { version = "0.3.0-alpha" }
 rand = "0.9"
 socks5-impl = { version = "0.7", features = ["serde", "tokio", "server"] }
 uuid.workspace = true
+dashmap.workspace = true
 bitping-swarm = { git = "ssh://git@gitlab.com/uptimesv/p2p-job-dispatcher.git", branch = "master", package = "bitping-swarm" }
 bitping-tcp-proxy.workspace = true
 protocols = { git = "ssh://git@gitlab.com/uptimesv/NATless-GRPC-Proxy.git", branch = "master", package = "protocols" }

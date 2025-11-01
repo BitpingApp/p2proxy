@@ -36,6 +36,7 @@ libp2p = { version = "0.55", features = [
   "serde",
 ] }
 uuid = { version = "1.12.1", features = ["v4", "fast-rng"] }
+dashmap = "6.0"
 
 # The profile that 'dist' will build with
 [profile.dist]

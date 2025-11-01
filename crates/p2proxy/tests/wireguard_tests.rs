@@ -24,6 +24,14 @@ const WIREGUARD_MESSAGE_HANDSHAKE_RESPONSE: u8 = 2;
 const WIREGUARD_MESSAGE_COOKIE_REPLY: u8 = 3;
 const WIREGUARD_MESSAGE_DATA: u8 = 4;
 
+// WireGuard packet size constants (based on WireGuard protocol specification)
+const WIREGUARD_HANDSHAKE_INIT_SIZE: usize = 148;
+const WIREGUARD_HANDSHAKE_RESP_SIZE: usize = 92;
+const WIREGUARD_COOKIE_REPLY_SIZE: usize = 64;
+const WIREGUARD_DATA_PACKET_MIN_SIZE: usize = 32;  // 16 byte header + 16 byte auth tag
+const WIREGUARD_DATA_PACKET_TEST_SIZE: usize = 128; // Test size for data packets
+const WIREGUARD_MAX_MTU_SIZE: usize = 1420;         // Typical WireGuard MTU
+
 // =============================================================================
 // WireGuard Protocol Tests
 // =============================================================================
@@ -54,8 +62,7 @@ async fn test_wireguard_handshake_initiation() {
     let port = 51821;
 
     // Create a mock WireGuard handshake initiation packet
-    // WireGuard handshake initiation is 148 bytes
-    let mut packet = vec![0u8; 148];
+    let mut packet = vec![0u8; WIREGUARD_HANDSHAKE_INIT_SIZE];
     packet[0] = WIREGUARD_MESSAGE_HANDSHAKE_INITIATION;
     packet[1] = 0; // Reserved
     packet[2] = 0; // Reserved
@@ -76,7 +83,7 @@ async fn test_wireguard_handshake_initiation() {
         .send_to(&packet, SocketAddr::from(([127, 0, 0, 1], port)))
         .await
         .unwrap();
-    assert_eq!(sent, 148);
+    assert_eq!(sent, WIREGUARD_HANDSHAKE_INIT_SIZE);
 
     // Receive packet on server
     let mut buf = vec![0u8; 4096];
@@ -87,7 +94,7 @@ async fn test_wireguard_handshake_initiation() {
 
     assert!(result.is_ok(), "Should receive packet within timeout");
     let (len, _addr) = result.unwrap().unwrap();
-    assert_eq!(len, 148);
+    assert_eq!(len, WIREGUARD_HANDSHAKE_INIT_SIZE);
     assert_eq!(buf[0], WIREGUARD_MESSAGE_HANDSHAKE_INITIATION);
 }
 
@@ -99,8 +106,7 @@ async fn test_wireguard_handshake_response() {
     let port = 51822;
 
     // Create a mock WireGuard handshake response packet
-    // WireGuard handshake response is 92 bytes
-    let mut packet = vec![0u8; 92];
+    let mut packet = vec![0u8; WIREGUARD_HANDSHAKE_RESP_SIZE];
     packet[0] = WIREGUARD_MESSAGE_HANDSHAKE_RESPONSE;
     packet[1] = 0; // Reserved
     packet[2] = 0; // Reserved
@@ -119,7 +125,7 @@ async fn test_wireguard_handshake_response() {
         .send_to(&packet, SocketAddr::from(([127, 0, 0, 1], port)))
         .await
         .unwrap();
-    assert_eq!(sent, 92);
+    assert_eq!(sent, WIREGUARD_HANDSHAKE_RESP_SIZE);
 
     // Receive packet on server
     let mut buf = vec![0u8; 4096];
@@ -130,7 +136,7 @@ async fn test_wireguard_handshake_response() {
 
     assert!(result.is_ok(), "Should receive packet within timeout");
     let (len, _addr) = result.unwrap().unwrap();
-    assert_eq!(len, 92);
+    assert_eq!(len, WIREGUARD_HANDSHAKE_RESP_SIZE);
     assert_eq!(buf[0], WIREGUARD_MESSAGE_HANDSHAKE_RESPONSE);
 }
 
@@ -142,8 +148,7 @@ async fn test_wireguard_cookie_reply() {
     let port = 51823;
 
     // Create a mock WireGuard cookie reply packet
-    // WireGuard cookie reply is 64 bytes
-    let mut packet = vec![0u8; 64];
+    let mut packet = vec![0u8; WIREGUARD_COOKIE_REPLY_SIZE];
     packet[0] = WIREGUARD_MESSAGE_COOKIE_REPLY;
     packet[1] = 0; // Reserved
     packet[2] = 0; // Reserved
@@ -162,7 +167,7 @@ async fn test_wireguard_cookie_reply() {
         .send_to(&packet, SocketAddr::from(([127, 0, 0, 1], port)))
         .await
         .unwrap();
-    assert_eq!(sent, 64);
+    assert_eq!(sent, WIREGUARD_COOKIE_REPLY_SIZE);
 
     // Receive packet on server
     let mut buf = vec![0u8; 4096];
@@ -173,7 +178,7 @@ async fn test_wireguard_cookie_reply() {
 
     assert!(result.is_ok(), "Should receive packet within timeout");
     let (len, _addr) = result.unwrap().unwrap();
-    assert_eq!(len, 64);
+    assert_eq!(len, WIREGUARD_COOKIE_REPLY_SIZE);
     assert_eq!(buf[0], WIREGUARD_MESSAGE_COOKIE_REPLY);
 }
 
@@ -187,7 +192,7 @@ async fn test_wireguard_data_packet() {
     // Create a mock WireGuard data packet
     // WireGuard data packets are at least 32 bytes (16 byte header + 16 byte auth tag)
     // plus the encrypted payload
-    let mut packet = vec![0u8; 128];
+    let mut packet = vec![0u8; WIREGUARD_DATA_PACKET_TEST_SIZE];
     packet[0] = WIREGUARD_MESSAGE_DATA;
     packet[1] = 0; // Reserved
     packet[2] = 0; // Reserved
@@ -209,7 +214,7 @@ async fn test_wireguard_data_packet() {
         .send_to(&packet, SocketAddr::from(([127, 0, 0, 1], port)))
         .await
         .unwrap();
-    assert_eq!(sent, 128);
+    assert_eq!(sent, WIREGUARD_DATA_PACKET_TEST_SIZE);
 
     // Receive packet on server
     let mut buf = vec![0u8; 4096];
@@ -220,7 +225,7 @@ async fn test_wireguard_data_packet() {
 
     assert!(result.is_ok(), "Should receive packet within timeout");
     let (len, _addr) = result.unwrap().unwrap();
-    assert_eq!(len, 128);
+    assert_eq!(len, WIREGUARD_DATA_PACKET_TEST_SIZE);
     assert_eq!(buf[0], WIREGUARD_MESSAGE_DATA);
 }
 
@@ -232,7 +237,7 @@ async fn test_wireguard_unknown_message_type() {
     let port = 51825;
 
     // Create a packet with an unknown message type
-    let mut packet = vec![0u8; 64];
+    let mut packet = vec![0u8; WIREGUARD_COOKIE_REPLY_SIZE];
     packet[0] = 99; // Unknown message type
 
     // Create server socket
@@ -248,7 +253,7 @@ async fn test_wireguard_unknown_message_type() {
         .send_to(&packet, SocketAddr::from(([127, 0, 0, 1], port)))
         .await
         .unwrap();
-    assert_eq!(sent, 64);
+    assert_eq!(sent, WIREGUARD_COOKIE_REPLY_SIZE);
 
     // Receive packet on server
     let mut buf = vec![0u8; 4096];
@@ -259,7 +264,7 @@ async fn test_wireguard_unknown_message_type() {
 
     assert!(result.is_ok(), "Should receive packet within timeout");
     let (len, _addr) = result.unwrap().unwrap();
-    assert_eq!(len, 64);
+    assert_eq!(len, WIREGUARD_COOKIE_REPLY_SIZE);
     assert_eq!(buf[0], 99); // Should still receive the packet
 }
 
@@ -294,7 +299,7 @@ async fn test_wireguard_concurrent_packets() {
         .iter()
         .enumerate()
         .map(|(i, client)| {
-            let packet = vec![WIREGUARD_MESSAGE_DATA; 64];
+            let packet = vec![WIREGUARD_MESSAGE_DATA; WIREGUARD_COOKIE_REPLY_SIZE];
             async move {
                 client
                     .send_to(&packet, SocketAddr::from(([127, 0, 0, 1], port)))
@@ -345,14 +350,14 @@ async fn test_wireguard_packet_size_limits() {
 
     // Test with maximum MTU size (typical WireGuard packet)
     // Most networks support at least 1420 bytes for WireGuard
-    let mut max_packet = vec![0u8; 1420];
+    let mut max_packet = vec![0u8; WIREGUARD_MAX_MTU_SIZE];
     max_packet[0] = WIREGUARD_MESSAGE_DATA;
 
     let sent = client_socket
         .send_to(&max_packet, SocketAddr::from(([127, 0, 0, 1], port)))
         .await
         .unwrap();
-    assert_eq!(sent, 1420);
+    assert_eq!(sent, WIREGUARD_MAX_MTU_SIZE);
 
     // Receive large packet
     let mut buf = vec![0u8; 4096];
@@ -363,7 +368,7 @@ async fn test_wireguard_packet_size_limits() {
 
     assert!(result.is_ok(), "Should receive large packet within timeout");
     let (len, _addr) = result.unwrap().unwrap();
-    assert_eq!(len, 1420);
+    assert_eq!(len, WIREGUARD_MAX_MTU_SIZE);
     assert_eq!(buf[0], WIREGUARD_MESSAGE_DATA);
 }
 
@@ -446,10 +451,10 @@ async fn test_wireguard_mixed_message_types() {
 
     // Send different message types in sequence
     let message_types = vec![
-        (WIREGUARD_MESSAGE_HANDSHAKE_INITIATION, 148),
-        (WIREGUARD_MESSAGE_HANDSHAKE_RESPONSE, 92),
-        (WIREGUARD_MESSAGE_COOKIE_REPLY, 64),
-        (WIREGUARD_MESSAGE_DATA, 128),
+        (WIREGUARD_MESSAGE_HANDSHAKE_INITIATION, WIREGUARD_HANDSHAKE_INIT_SIZE),
+        (WIREGUARD_MESSAGE_HANDSHAKE_RESPONSE, WIREGUARD_HANDSHAKE_RESP_SIZE),
+        (WIREGUARD_MESSAGE_COOKIE_REPLY, WIREGUARD_COOKIE_REPLY_SIZE),
+        (WIREGUARD_MESSAGE_DATA, WIREGUARD_DATA_PACKET_TEST_SIZE),
     ];
 
     for (msg_type, size) in message_types {
