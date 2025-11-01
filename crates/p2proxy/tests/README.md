@@ -21,6 +21,7 @@ This directory contains comprehensive tests for P2Proxy covering connection hand
 tests/
 ├── common/                      # Shared test utilities and mocks
 │   ├── mod.rs                   # Common module exports
+│   ├── platform.rs              # Platform-specific test helpers
 │   ├── fixtures.rs              # Test fixtures and configurations
 │   ├── test_utils.rs            # Helper functions and utilities
 │   ├── mock_swarm.rs            # Mock libp2p Swarm for testing

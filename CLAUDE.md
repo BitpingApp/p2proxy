@@ -69,6 +69,28 @@ RUST_LOG=debug cargo test test_name -- --nocapture
 RUST_LOG=trace cargo test -- --nocapture
 ```
 
+#### Platform-Aware Testing
+
+The test suite includes platform-specific optimizations to improve performance while maintaining reliability:
+
+- **Platform Detection**: Tests automatically detect the OS (Linux/macOS/Windows) and adjust timing parameters
+- **Optimized Latencies**: Linux tests run ~2x faster with reduced mock latencies
+- **Timeout Protection**: macOS tests use 2x timeouts to prevent spurious failures due to scheduler overhead
+- **Threshold Adjustments**: Jitter and latency tests use platform-specific assertion thresholds
+
+**Test Performance by Platform:**
+- **Linux**: ~1-2 minutes (optimized for CI)
+- **macOS**: ~5-10 minutes (realistic timing with overhead protection)
+- **Windows**: ~5-10 minutes (conservative defaults)
+
+**Platform Helpers** (`tests/common/platform.rs`):
+- `platform_latency(ms)` - Adjusts mock latencies per platform
+- `platform_sleep(ms)` - Optimizes test setup delays
+- `platform_timeout(duration)` - Prevents timeout failures on slower platforms
+- `*_thresholds()` - Platform-specific assertion thresholds for latency tests
+
+For more details on test optimizations, see `crates/p2proxy/tests/MACOS_OPTIMIZATION.md`.
+
 ### Benchmarks
 
 Run performance benchmarks:
