@@ -47,7 +47,7 @@ Run specific test categories:
 # Connection tests (P2P, SOCKS5, RPC) - 14 tests
 cargo test --test connection_tests
 
-# Disconnection tests (failures, cleanup) - 9 tests
+# Disconnection tests (failures, cleanup) - 11 tests
 cargo test --test disconnection_tests
 
 # Throughput tests (basic bandwidth validation) - 3 tests
