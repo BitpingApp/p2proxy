@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { gotoWithCookieHandling, dismissCookiePopup } from './test-utils';
 
 /**
  * News and media website tests through the SOCKS5 proxy
@@ -11,7 +12,7 @@ test.describe('News Website Tests', () => {
   test.describe.configure({ retries: 2 });
 
   test('should load BBC News homepage', async ({ page }) => {
-    await page.goto('https://www.bbc.com/news', { waitUntil: 'domcontentloaded' });
+    await gotoWithCookieHandling(page, 'https://www.bbc.com/news');
 
     // Verify page loaded
     await expect(page).toHaveTitle(/BBC News/i);
@@ -22,7 +23,7 @@ test.describe('News Website Tests', () => {
   });
 
   test('should load CNN homepage', async ({ page }) => {
-    await page.goto('https://www.cnn.com/', { waitUntil: 'domcontentloaded' });
+    await gotoWithCookieHandling(page, 'https://www.cnn.com/');
 
     // Verify page loaded
     await expect(page).toHaveTitle(/CNN/i);
@@ -33,7 +34,7 @@ test.describe('News Website Tests', () => {
   });
 
   test('should load Reuters homepage', async ({ page }) => {
-    await page.goto('https://www.reuters.com/', { waitUntil: 'domcontentloaded' });
+    await gotoWithCookieHandling(page, 'https://www.reuters.com/');
 
     // Verify page loaded
     await expect(page).toHaveTitle(/Reuters/i);
@@ -44,7 +45,7 @@ test.describe('News Website Tests', () => {
   });
 
   test('should load The Guardian homepage', async ({ page }) => {
-    await page.goto('https://www.theguardian.com/', { waitUntil: 'domcontentloaded' });
+    await gotoWithCookieHandling(page, 'https://www.theguardian.com/');
 
     // Verify page loaded
     await expect(page).toHaveTitle(/The Guardian/i);
@@ -55,7 +56,7 @@ test.describe('News Website Tests', () => {
   });
 
   test('should load NPR homepage', async ({ page }) => {
-    await page.goto('https://www.npr.org/', { waitUntil: 'domcontentloaded' });
+    await gotoWithCookieHandling(page, 'https://www.npr.org/');
 
     // Verify page loaded
     await expect(page).toHaveTitle(/NPR/i);
@@ -66,7 +67,7 @@ test.describe('News Website Tests', () => {
   });
 
   test('should handle news site with images and videos', async ({ page }) => {
-    await page.goto('https://www.bbc.com/news', { waitUntil: 'domcontentloaded' });
+    await gotoWithCookieHandling(page, 'https://www.bbc.com/news');
 
     // Wait for main content
     await page.waitForSelector('main, [role="main"]', { timeout: 15000 });
@@ -85,7 +86,7 @@ test.describe('News Website Tests', () => {
   });
 
   test('should navigate between news articles', async ({ page }) => {
-    await page.goto('https://www.bbc.com/news', { waitUntil: 'domcontentloaded' });
+    await gotoWithCookieHandling(page, 'https://www.bbc.com/news');
 
     // Wait for main content
     await page.waitForSelector('main, [role="main"]', { timeout: 15000 });

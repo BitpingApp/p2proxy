@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { waitForPageReady, safelyInteract, TIMEOUTS } from './test-utils';
+import { waitForPageReady, safelyInteract, TIMEOUTS, gotoWithCookieHandling } from './test-utils';
 
 /**
  * Video streaming tests through the SOCKS5 proxy
@@ -12,7 +12,7 @@ test.describe('Video Streaming Tests', () => {
   test.describe.configure({ retries: 2 });
 
   test('should load YouTube homepage', async ({ page }) => {
-    await page.goto('https://www.youtube.com/', { waitUntil: 'domcontentloaded' });
+    await gotoWithCookieHandling(page, 'https://www.youtube.com/');
 
     // Verify page loaded
     await expect(page).toHaveTitle(/YouTube/i);
@@ -26,7 +26,7 @@ test.describe('Video Streaming Tests', () => {
   });
 
   test('should search on YouTube', async ({ page }) => {
-    await page.goto('https://www.youtube.com/', { waitUntil: 'domcontentloaded' });
+    await gotoWithCookieHandling(page, 'https://www.youtube.com/');
 
     // Wait for page to stabilize
     await waitForPageReady(page);
@@ -75,10 +75,7 @@ test.describe('Video Streaming Tests', () => {
 
   test('should load a public YouTube video page', async ({ page }) => {
     // Use a stable, public video (YouTube's own channel trailer is usually stable)
-    await page.goto('https://www.youtube.com/watch?v=dQw4w9WgXcQ', {
-      waitUntil: 'domcontentloaded',
-      timeout: TIMEOUTS.PAGE_LOAD,
-    });
+    await gotoWithCookieHandling(page, 'https://www.youtube.com/watch?v=dQw4w9WgXcQ');
 
     // Wait for page to load dynamically
     await waitForPageReady(page);
@@ -95,7 +92,7 @@ test.describe('Video Streaming Tests', () => {
   });
 
   test('should load Vimeo homepage', async ({ page }) => {
-    await page.goto('https://vimeo.com/', { waitUntil: 'domcontentloaded' });
+    await gotoWithCookieHandling(page, 'https://vimeo.com/');
 
     // Verify page loaded
     await expect(page).toHaveTitle(/Vimeo/i);
@@ -106,7 +103,7 @@ test.describe('Video Streaming Tests', () => {
   });
 
   test('should load Twitch homepage', async ({ page }) => {
-    await page.goto('https://www.twitch.tv/', { waitUntil: 'domcontentloaded' });
+    await gotoWithCookieHandling(page, 'https://www.twitch.tv/');
 
     // Verify page loaded
     await expect(page).toHaveTitle(/Twitch/i);
@@ -136,9 +133,8 @@ test.describe('Video Streaming Tests', () => {
       }
     });
 
-    await page.goto('https://www.youtube.com/', {
+    await gotoWithCookieHandling(page, 'https://www.youtube.com/', {
       waitUntil: 'networkidle',
-      timeout: TIMEOUTS.NETWORK_IDLE,
     });
 
     // Verify page loads without errors
@@ -152,10 +148,7 @@ test.describe('Video Streaming Tests', () => {
   });
 
   test('should load streaming thumbnails and images', async ({ page }) => {
-    await page.goto('https://www.youtube.com/', {
-      waitUntil: 'domcontentloaded',
-      timeout: TIMEOUTS.PAGE_LOAD,
-    });
+    await gotoWithCookieHandling(page, 'https://www.youtube.com/');
 
     // Wait for thumbnails to load dynamically
     await page.waitForLoadState('networkidle', { timeout: TIMEOUTS.NETWORK_IDLE });
