@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { gotoWithCookieHandling } from './test-utils';
 
 /**
  * Speed test and performance measurement tests
@@ -7,7 +8,7 @@ import { test, expect } from '@playwright/test';
 
 test.describe('Speed Test Services', () => {
   test('should load Cloudflare Speed Test', async ({ page }) => {
-    await page.goto('https://speed.cloudflare.com/', { waitUntil: 'domcontentloaded' });
+    await gotoWithCookieHandling(page, 'https://speed.cloudflare.com/');
 
     // Verify page loaded
     await expect(page).toHaveTitle(/Speed Test/i);
@@ -24,7 +25,7 @@ test.describe('Speed Test Services', () => {
   });
 
   test('should display Cloudflare Speed Test UI elements', async ({ page }) => {
-    await page.goto('https://speed.cloudflare.com/', { waitUntil: 'domcontentloaded' });
+    await gotoWithCookieHandling(page, 'https://speed.cloudflare.com/');
 
     // Wait for page to initialize
     await page.waitForTimeout(3000);
@@ -38,7 +39,7 @@ test.describe('Speed Test Services', () => {
   });
 
   test('should load Fast.com (Netflix speed test)', async ({ page }) => {
-    await page.goto('https://fast.com/', { waitUntil: 'domcontentloaded' });
+    await gotoWithCookieHandling(page, 'https://fast.com/');
 
     // Verify page loaded
     await expect(page).toHaveTitle(/Internet Speed Test/i);
@@ -52,7 +53,7 @@ test.describe('Speed Test Services', () => {
   });
 
   test('should load Speedtest.net', async ({ page }) => {
-    await page.goto('https://www.speedtest.net/', { waitUntil: 'domcontentloaded' });
+    await gotoWithCookieHandling(page, 'https://www.speedtest.net/');
 
     // Verify page loaded
     await expect(page).toHaveTitle(/Speedtest/i);
@@ -73,7 +74,7 @@ test.describe('Speed Test Services', () => {
       }
     });
 
-    await page.goto('https://www.wikipedia.org/', { waitUntil: 'networkidle' });
+    await gotoWithCookieHandling(page, 'https://www.wikipedia.org/', { waitUntil: 'networkidle' });
 
     // Verify we got successful responses
     expect(responses.length).toBeGreaterThan(0);
@@ -88,7 +89,7 @@ test.describe('Speed Test Services', () => {
       responses.push(response.url());
     });
 
-    await page.goto('https://www.wikipedia.org/', { waitUntil: 'networkidle' });
+    await gotoWithCookieHandling(page, 'https://www.wikipedia.org/', { waitUntil: 'networkidle' });
 
     // Verify multiple requests were made (images, CSS, JS, etc.)
     expect(responses.length).toBeGreaterThan(5);

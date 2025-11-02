@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { measurePageLoadTime, TIMEOUTS } from './test-utils';
+import { measurePageLoadTime, TIMEOUTS, gotoWithCookieHandling } from './test-utils';
 
 /**
  * Proxy-specific feature tests
@@ -9,7 +9,7 @@ import { measurePageLoadTime, TIMEOUTS } from './test-utils';
 test.describe('Proxy Feature Tests', () => {
   test('should handle different HTTP methods', async ({ page }) => {
     // Test GET requests
-    await page.goto('https://httpbin.org/get', { waitUntil: 'domcontentloaded' });
+    await gotoWithCookieHandling(page, 'https://httpbin.org/get');
 
     const body = await page.locator('body').textContent();
     expect(body).toContain('httpbin.org');
@@ -20,7 +20,7 @@ test.describe('Proxy Feature Tests', () => {
   });
 
   test('should handle POST requests', async ({ page }) => {
-    await page.goto('https://httpbin.org/forms/post', { waitUntil: 'domcontentloaded' });
+    await gotoWithCookieHandling(page, 'https://httpbin.org/forms/post');
 
     // Fill out a simple form if available
     const form = page.locator('form').first();
@@ -31,7 +31,7 @@ test.describe('Proxy Feature Tests', () => {
   });
 
   test('should preserve headers through proxy', async ({ page }) => {
-    await page.goto('https://httpbin.org/headers', { waitUntil: 'domcontentloaded' });
+    await gotoWithCookieHandling(page, 'https://httpbin.org/headers');
 
     const body = await page.locator('body').textContent();
 
@@ -42,7 +42,7 @@ test.describe('Proxy Feature Tests', () => {
 
   test('should handle redirects correctly', async ({ page }) => {
     // Test 301 redirect
-    await page.goto('https://httpbin.org/redirect/1', { waitUntil: 'domcontentloaded' });
+    await gotoWithCookieHandling(page, 'https://httpbin.org/redirect/1');
 
     // Should end up at /get
     await page.waitForTimeout(2000);
@@ -53,7 +53,7 @@ test.describe('Proxy Feature Tests', () => {
 
   test('should handle large responses', async ({ page }) => {
     // Request a large response (1000 bytes)
-    await page.goto('https://httpbin.org/bytes/1000', { waitUntil: 'domcontentloaded' });
+    await gotoWithCookieHandling(page, 'https://httpbin.org/bytes/1000');
 
     // Verify we got content
     const body = await page.locator('body').textContent();
@@ -62,7 +62,7 @@ test.describe('Proxy Feature Tests', () => {
   });
 
   test('should handle gzip compression', async ({ page }) => {
-    await page.goto('https://httpbin.org/gzip', { waitUntil: 'domcontentloaded' });
+    await gotoWithCookieHandling(page, 'https://httpbin.org/gzip');
 
     const body = await page.locator('body').textContent();
 
@@ -72,9 +72,7 @@ test.describe('Proxy Feature Tests', () => {
   });
 
   test('should handle cookies', async ({ page }) => {
-    await page.goto('https://httpbin.org/cookies/set?test=value', {
-      waitUntil: 'domcontentloaded',
-    });
+    await gotoWithCookieHandling(page, 'https://httpbin.org/cookies/set?test=value');
 
     // Get cookies
     const cookies = await page.context().cookies();
@@ -92,7 +90,7 @@ test.describe('Proxy Feature Tests', () => {
       ws.on('framesent', (event) => wsMessages.push('sent'));
     });
 
-    await page.goto('https://www.wikipedia.org/', { waitUntil: 'domcontentloaded' });
+    await gotoWithCookieHandling(page, 'https://www.wikipedia.org/');
 
     // Page should load regardless of WebSocket support
     const hasContent = await page.locator('body').isVisible();
@@ -116,9 +114,9 @@ test.describe('Proxy Feature Tests', () => {
 
       // Navigate to different sites concurrently
       const navigations = [
-        pages[0].goto('https://www.wikipedia.org/', { waitUntil: 'domcontentloaded' }),
-        pages[1].goto('https://www.github.com/', { waitUntil: 'domcontentloaded' }),
-        pages[2].goto('https://www.bbc.com/', { waitUntil: 'domcontentloaded' }),
+        gotoWithCookieHandling(pages[0], 'https://www.wikipedia.org/'),
+        gotoWithCookieHandling(pages[1], 'https://www.github.com/'),
+        gotoWithCookieHandling(pages[2], 'https://www.bbc.com/'),
       ];
 
       await Promise.all(navigations);
@@ -137,28 +135,24 @@ test.describe('Proxy Feature Tests', () => {
 
   test('should handle connection pooling', async ({ page }) => {
     // Make multiple requests to the same host
-    await page.goto('https://www.wikipedia.org/', { waitUntil: 'networkidle' });
+    await gotoWithCookieHandling(page, 'https://www.wikipedia.org/', { waitUntil: 'networkidle' });
 
     // Navigate to another page on same host
-    await page.goto('https://en.wikipedia.org/wiki/Internet', {
-      waitUntil: 'domcontentloaded',
-    });
+    await gotoWithCookieHandling(page, 'https://en.wikipedia.org/wiki/Internet');
 
     // Verify page loaded (should reuse connection)
     const hasContent = await page.locator('body').isVisible();
     expect(hasContent).toBeTruthy();
 
     // Navigate to third page
-    await page.goto('https://en.wikipedia.org/wiki/Computer', {
-      waitUntil: 'domcontentloaded',
-    });
+    await gotoWithCookieHandling(page, 'https://en.wikipedia.org/wiki/Computer');
 
     expect(await page.locator('body').isVisible()).toBeTruthy();
   });
 
   test('should handle IPv4 addresses', async ({ page }) => {
     // Test direct IP access
-    await page.goto('https://1.1.1.1/', { waitUntil: 'domcontentloaded' });
+    await gotoWithCookieHandling(page, 'https://1.1.1.1/');
 
     // Verify page loaded
     const hasContent = await page.locator('body').isVisible();

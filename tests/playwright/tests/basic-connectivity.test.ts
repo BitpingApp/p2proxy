@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { gotoWithCookieHandling } from './test-utils';
 
 /**
  * Basic connectivity tests through the SOCKS5 proxy
@@ -8,7 +9,7 @@ import { test, expect } from '@playwright/test';
 
 test.describe('Basic Proxy Connectivity', () => {
   test('should connect to Wikipedia homepage', async ({ page }) => {
-    await page.goto('https://www.wikipedia.org/');
+    await gotoWithCookieHandling(page, 'https://www.wikipedia.org/');
 
     // Verify page loaded successfully
     await expect(page).toHaveTitle(/Wikipedia/);
@@ -23,7 +24,7 @@ test.describe('Basic Proxy Connectivity', () => {
   });
 
   test('should navigate to English Wikipedia', async ({ page }) => {
-    await page.goto('https://www.wikipedia.org/');
+    await gotoWithCookieHandling(page, 'https://www.wikipedia.org/');
 
     // Click English Wikipedia
     await page.click('#js-link-box-en');
@@ -40,7 +41,7 @@ test.describe('Basic Proxy Connectivity', () => {
   });
 
   test('should perform Wikipedia search', async ({ page }) => {
-    await page.goto('https://en.wikipedia.org/');
+    await gotoWithCookieHandling(page, 'https://en.wikipedia.org/');
 
     // Search for "Proxy server"
     await page.fill('#searchInput', 'Proxy server');
@@ -59,7 +60,7 @@ test.describe('Basic Proxy Connectivity', () => {
   });
 
   test('should load Wikipedia article with images', async ({ page }) => {
-    await page.goto('https://en.wikipedia.org/wiki/Internet');
+    await gotoWithCookieHandling(page, 'https://en.wikipedia.org/wiki/Internet');
 
     // Verify article title
     await expect(page.locator('#firstHeading')).toContainText('Internet');
@@ -85,7 +86,7 @@ test.describe('Basic Proxy Connectivity', () => {
     ];
 
     for (const site of sites) {
-      await page.goto(site);
+      await gotoWithCookieHandling(page, site);
       await expect(page).not.toHaveTitle('');
 
       // Verify no security errors

@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { gotoWithCookieHandling } from './test-utils';
 
 /**
  * Tests for popular websites across different categories
@@ -7,7 +8,7 @@ import { test, expect } from '@playwright/test';
 
 test.describe('Popular Websites', () => {
   test('should load GitHub homepage', async ({ page }) => {
-    await page.goto('https://github.com/', { waitUntil: 'domcontentloaded' });
+    await gotoWithCookieHandling(page, 'https://github.com/');
 
     // Verify page loaded
     await expect(page).toHaveTitle(/GitHub/i);
@@ -18,7 +19,7 @@ test.describe('Popular Websites', () => {
   });
 
   test('should load Stack Overflow', async ({ page }) => {
-    await page.goto('https://stackoverflow.com/', { waitUntil: 'domcontentloaded' });
+    await gotoWithCookieHandling(page, 'https://stackoverflow.com/');
 
     // Verify page loaded
     await expect(page).toHaveTitle(/Stack Overflow/i);
@@ -29,7 +30,7 @@ test.describe('Popular Websites', () => {
   });
 
   test('should load Reddit homepage', async ({ page }) => {
-    await page.goto('https://www.reddit.com/', { waitUntil: 'domcontentloaded' });
+    await gotoWithCookieHandling(page, 'https://www.reddit.com/');
 
     // Verify page loaded
     await expect(page).toHaveTitle(/Reddit/i);
@@ -40,7 +41,7 @@ test.describe('Popular Websites', () => {
   });
 
   test('should load Twitter/X homepage', async ({ page }) => {
-    await page.goto('https://x.com/', { waitUntil: 'domcontentloaded' });
+    await gotoWithCookieHandling(page, 'https://x.com/');
 
     // Verify page loaded (title may vary)
     await page.waitForTimeout(2000);
@@ -51,7 +52,7 @@ test.describe('Popular Websites', () => {
   });
 
   test('should load Amazon homepage', async ({ page }) => {
-    await page.goto('https://www.amazon.com/', { waitUntil: 'domcontentloaded' });
+    await gotoWithCookieHandling(page, 'https://www.amazon.com/');
 
     // Verify page loaded
     await expect(page).toHaveTitle(/Amazon/i);
@@ -62,7 +63,7 @@ test.describe('Popular Websites', () => {
   });
 
   test('should load Google Search', async ({ page }) => {
-    await page.goto('https://www.google.com/', { waitUntil: 'domcontentloaded' });
+    await gotoWithCookieHandling(page, 'https://www.google.com/');
 
     // Verify page loaded
     await expect(page).toHaveTitle(/Google/i);
@@ -73,7 +74,7 @@ test.describe('Popular Websites', () => {
   });
 
   test('should perform Google search', async ({ page }) => {
-    await page.goto('https://www.google.com/', { waitUntil: 'domcontentloaded' });
+    await gotoWithCookieHandling(page, 'https://www.google.com/');
 
     // Wait for search box
     const searchBox = page.locator('textarea[name="q"], input[name="q"]').first();
@@ -95,7 +96,7 @@ test.describe('Popular Websites', () => {
   });
 
   test('should load DuckDuckGo', async ({ page }) => {
-    await page.goto('https://duckduckgo.com/', { waitUntil: 'domcontentloaded' });
+    await gotoWithCookieHandling(page, 'https://duckduckgo.com/');
 
     // Verify page loaded
     await expect(page).toHaveTitle(/DuckDuckGo/i);
@@ -106,7 +107,7 @@ test.describe('Popular Websites', () => {
   });
 
   test('should load Medium homepage', async ({ page }) => {
-    await page.goto('https://medium.com/', { waitUntil: 'domcontentloaded' });
+    await gotoWithCookieHandling(page, 'https://medium.com/');
 
     // Verify page loaded
     await expect(page).toHaveTitle(/Medium/i);
@@ -117,7 +118,7 @@ test.describe('Popular Websites', () => {
   });
 
   test('should load MDN Web Docs', async ({ page }) => {
-    await page.goto('https://developer.mozilla.org/', { waitUntil: 'domcontentloaded' });
+    await gotoWithCookieHandling(page, 'https://developer.mozilla.org/');
 
     // Verify page loaded
     await expect(page).toHaveTitle(/MDN/i);
@@ -135,7 +136,7 @@ test.describe('Popular Websites', () => {
     ];
 
     for (const site of sites) {
-      await page.goto(site, { waitUntil: 'domcontentloaded' });
+      await gotoWithCookieHandling(page, site);
 
       // Wait for JS to execute
       await page.waitForTimeout(3000);

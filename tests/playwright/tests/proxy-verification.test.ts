@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { verifyProxyUsage, TIMEOUTS } from './test-utils';
+import { verifyProxyUsage, TIMEOUTS, gotoWithCookieHandling } from './test-utils';
 
 /**
  * Proxy verification tests
@@ -19,10 +19,7 @@ test.describe('Proxy Verification', () => {
 
   test('should successfully connect through proxy', async ({ page }) => {
     // Use httpbin.org to verify connection details
-    await page.goto('https://httpbin.org/get', {
-      waitUntil: 'domcontentloaded',
-      timeout: TIMEOUTS.PAGE_LOAD,
-    });
+    await gotoWithCookieHandling(page, 'https://httpbin.org/get');
 
     // Verify we got a response
     const body = await page.locator('body').textContent();
@@ -36,10 +33,7 @@ test.describe('Proxy Verification', () => {
 
   test('should handle HTTPS through proxy', async ({ page }) => {
     // Verify HTTPS works through SOCKS5
-    await page.goto('https://httpbin.org/status/200', {
-      waitUntil: 'domcontentloaded',
-      timeout: TIMEOUTS.PAGE_LOAD,
-    });
+    await gotoWithCookieHandling(page, 'https://httpbin.org/status/200');
 
     // Should successfully load
     const body = await page.locator('body').isVisible();
@@ -87,10 +81,7 @@ test.describe('Proxy Verification', () => {
   });
 
   test('should preserve headers through proxy', async ({ page }) => {
-    await page.goto('https://httpbin.org/headers', {
-      waitUntil: 'domcontentloaded',
-      timeout: TIMEOUTS.PAGE_LOAD,
-    });
+    await gotoWithCookieHandling(page, 'https://httpbin.org/headers');
 
     const body = await page.locator('body').textContent();
     expect(body).toBeTruthy();
@@ -100,10 +91,7 @@ test.describe('Proxy Verification', () => {
   });
 
   test('should handle cookies through proxy', async ({ page }) => {
-    await page.goto('https://httpbin.org/cookies/set?test=proxy_value', {
-      waitUntil: 'domcontentloaded',
-      timeout: TIMEOUTS.PAGE_LOAD,
-    });
+    await gotoWithCookieHandling(page, 'https://httpbin.org/cookies/set?test=proxy_value');
 
     // Get cookies
     const cookies = await page.context().cookies();
@@ -134,10 +122,7 @@ test.describe('Proxy Verification', () => {
 
       // Navigate concurrently to different endpoints
       const navigations = pages.map((page, index) =>
-        page.goto(`https://httpbin.org/delay/${index}`, {
-          waitUntil: 'domcontentloaded',
-          timeout: TIMEOUTS.PAGE_LOAD,
-        })
+        gotoWithCookieHandling(page, `https://httpbin.org/delay/${index}`)
       );
 
       // All should complete successfully
