@@ -21,9 +21,9 @@ tests/
 │   ├── mock_peer.rs             # Mock peer node implementation
 │   └── mock_relay.rs            # Mock relay server
 ├── connection_tests.rs          # Connection establishment tests (14 tests)
-├── disconnection_tests.rs       # Disconnection and failure tests (9 tests)
+├── disconnection_tests.rs       # Disconnection and failure tests (11 tests)
 ├── throughput_tests.rs          # Basic bandwidth tests (3 tests)
-└── stability_tests.rs           # Failover and reconnection tests (11 + 3 long-running)
+└── stability_tests.rs           # Failover and reconnection tests (11 tests)
 ```
 
 ## Running Tests
@@ -48,7 +48,7 @@ Test P2P connection establishment, SOCKS5 proxy functionality, and RPC communica
 cargo test --test connection_tests
 ```
 
-#### Disconnection Tests (9 tests)
+#### Disconnection Tests (11 tests)
 Test graceful disconnections, network failures, and error handling:
 ```bash
 cargo test --test disconnection_tests
@@ -60,14 +60,10 @@ Test basic byte counting and concurrent sessions:
 cargo test --test throughput_tests
 ```
 
-#### Stability Tests (11 quick + 3 long-running)
+#### Stability Tests (11 tests)
 Test reconnection logic, failover, and resource management:
 ```bash
-# Run only quick stability tests
 cargo test --test stability_tests
-
-# Run long-running stability tests (can take hours)
-cargo test --test stability_tests -- --ignored --nocapture
 ```
 
 ### Running Individual Tests
@@ -121,7 +117,7 @@ Tests covering connection establishment and basic functionality:
 - Protocol exchanges complete successfully
 - Concurrent sessions don't interfere
 
-### Disconnection Tests (`disconnection_tests.rs`) - 9 tests
+### Disconnection Tests (`disconnection_tests.rs`) - 11 tests
 
 Tests covering clean and abrupt disconnection scenarios:
 
@@ -161,7 +157,7 @@ Simplified tests covering basic data transfer:
 
 **Note**: This suite focuses on ensuring data flows correctly rather than stringent performance measurements, as connection quality varies by peer.
 
-### Stability Tests (`stability_tests.rs`) - 11 quick + 3 long-running
+### Stability Tests (`stability_tests.rs`) - 11 tests
 
 Tests covering reconnection logic and failover scenarios:
 
@@ -179,11 +175,6 @@ Tests covering reconnection logic and failover scenarios:
 - Concurrent disconnections
 - Network partition healing ⭐ **CRITICAL** - Recovery after network outage
 
-**Long-Running Tests** (3 tests, marked with `#[ignore]`):
-- 24-hour connection stability
-- 6-hour continuous data transfer
-- 2-hour idle connection
-
 **Key Validations**:
 - Exponential backoff works correctly
 - Connections recover from failures
@@ -191,41 +182,20 @@ Tests covering reconnection logic and failover scenarios:
 - Network partitions are detected and recovered
 - Resources are cleaned up properly
 
-### Running Long-Running Tests
-
-Long-running tests are marked with `#[ignore]` and must be run manually:
-
-```bash
-# Run all long-running tests
-cargo test --test stability_tests -- --ignored --nocapture
-
-# Run specific tests
-cargo test test_24hour_stability -- --ignored --nocapture
-cargo test test_longrunning_transfer -- --ignored --nocapture
-cargo test test_idle_connection -- --ignored --nocapture
-```
-
-**Expected Durations**:
-- `test_24hour_stability`: 24 hours
-- `test_longrunning_transfer`: 6 hours
-- `test_idle_connection`: 2 hours
-
 ## Expected Durations
 
 Test suite execution times (on modern hardware):
 
 | Test Suite | Tests | Duration | Notes |
 |------------|-------|----------|-------|
-| All tests (excluding ignored) | 37 | 2-4 minutes | Standard test run |
+| All tests | 39 | 2-4 minutes | Standard test run |
 | Connection tests | 14 | 30-60 seconds | Fast, mostly unit tests |
-| Disconnection tests | 9 | 30-60 seconds | Includes timeout tests |
+| Disconnection tests | 11 | 30-60 seconds | Includes timeout tests |
 | Throughput tests | 3 | 15-30 seconds | Basic data transfer |
-| Stability tests (non-ignored) | 11 | 60-120 seconds | Reconnection and failover |
-| Long-running tests (--ignored) | 3 | 6-24 hours | Overnight/weekend tests |
+| Stability tests | 11 | 60-120 seconds | Reconnection and failover |
 
 **CI Performance**:
 - Full test suite: 3-8 minutes (with caching)
-- Long-running tests: Run weekly on schedule
 
 ## What Changed?
 
@@ -257,7 +227,7 @@ Connection quality varies significantly by peer, so stringent performance measur
 ✅ **Recoverability** - Do connections recover from failures?
 ✅ **Failover** - Does another connection kick in when one fails?
 
-This results in a **leaner, more focused test suite** (37 tests vs 54 tests, 31% reduction) that tests what actually matters for a P2P proxy system.
+This results in a **leaner, more focused test suite** (39 tests vs 54 tests, 28% reduction) that tests what actually matters for a P2P proxy system.
 
 ## Troubleshooting
 
@@ -286,15 +256,7 @@ cargo test -- --test-threads=1
 
 ### Platform-Specific Issues
 
-#### macOS
-
-- **File Descriptor Limits**: macOS has lower default limits
-  ```bash
-  ulimit -n 4096
-  cargo test
-  ```
-
-#### Linux
+#### Ubuntu/Linux
 
 - **Network Namespace Isolation**: Some tests may require privileges
   ```bash
@@ -302,12 +264,10 @@ cargo test -- --test-threads=1
   sudo -E cargo test
   ```
 
-#### Windows
-
-- **Path Length Limits**: Some test files may have long paths
+- **File Descriptor Limits**: If you encounter "too many open files" errors
   ```bash
-  # Enable long path support
-  git config --system core.longpaths true
+  ulimit -n 4096
+  cargo test
   ```
 
 ### Getting Help
@@ -329,7 +289,7 @@ When adding new tests:
 2. **Add documentation**: Include doc comments explaining what's tested
 3. **Set appropriate timeouts**: Use `tokio::time::timeout` for async operations
 4. **Use deterministic seeds**: Set RNG seeds for reproducible tests
-5. **Mark long tests**: Use `#[ignore]` for tests taking >1 minute
+5. **Keep tests fast**: Tests should complete in under 2 minutes for CI/CD
 6. **Add to categories**: Place tests in the appropriate file
 7. **Update this README**: Document new test categories or requirements
 8. **Focus on critical paths**: Test connectivity, recovery, and failover scenarios

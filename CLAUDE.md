@@ -53,11 +53,8 @@ cargo test --test disconnection_tests
 # Throughput tests (basic bandwidth validation) - 3 tests
 cargo test --test throughput_tests
 
-# Stability tests (reconnection, failover) - 11 quick tests
+# Stability tests (reconnection, failover) - 11 tests
 cargo test --test stability_tests
-
-# Long-running tests (6-24 hours, marked with #[ignore])
-cargo test -- --ignored --nocapture
 ```
 
 Run tests with logging:
@@ -74,9 +71,9 @@ The test suite is simplified and focused on three critical areas:
 **✅ Recoverability** - Do connections recover from failures? (exponential backoff, network partitions)
 **✅ Failover** - Does another connection kick in when one fails? (peer rotation)
 
-Total: **37 tests** (14 connection + 9 disconnection + 3 throughput + 11 stability) + 3 long-running
+Total: **39 tests** (14 connection + 11 disconnection + 3 throughput + 11 stability)
 
-**Removed** overly complex tests for jitter/latency percentiles and chaos engineering, since connection quality varies significantly by peer.
+**Removed** overly complex tests for jitter/latency percentiles, chaos engineering, and long-running tests, since connection quality varies significantly by peer.
 
 ### Benchmarks
 
