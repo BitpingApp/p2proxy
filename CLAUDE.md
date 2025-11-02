@@ -44,23 +44,17 @@ cargo test --all --verbose
 
 Run specific test categories:
 ```bash
-# Connection tests (P2P, SOCKS5, RPC)
+# Connection tests (P2P, SOCKS5, RPC) - 14 tests
 cargo test --test connection_tests
 
-# Disconnection tests (failures, cleanup)
+# Disconnection tests (failures, cleanup) - 11 tests
 cargo test --test disconnection_tests
 
-# Throughput tests (bandwidth, performance)
+# Throughput tests (basic bandwidth validation) - 3 tests
 cargo test --test throughput_tests
 
-# Jitter tests (latency, timing)
-cargo test --test jitter_tests
-
-# Stability tests (quick)
+# Stability tests (reconnection, failover) - 11 tests
 cargo test --test stability_tests
-
-# Long-running tests (6-24 hours, marked with #[ignore])
-cargo test -- --ignored --nocapture
 ```
 
 Run tests with logging:
@@ -68,6 +62,18 @@ Run tests with logging:
 RUST_LOG=debug cargo test test_name -- --nocapture
 RUST_LOG=trace cargo test -- --nocapture
 ```
+
+### Test Suite Focus
+
+The test suite is simplified and focused on three critical areas:
+
+**✅ Connectivity** - Can nodes connect? (P2P, SOCKS5, RPC)
+**✅ Recoverability** - Do connections recover from failures? (exponential backoff, network partitions)
+**✅ Failover** - Does another connection kick in when one fails? (peer rotation)
+
+Total: **39 tests** (14 connection + 11 disconnection + 3 throughput + 11 stability)
+
+**Removed** overly complex tests for jitter/latency percentiles, chaos engineering, and long-running tests, since connection quality varies significantly by peer.
 
 ### Benchmarks
 
