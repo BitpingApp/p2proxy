@@ -73,8 +73,9 @@ impl ExponentialBackoff {
     }
 
     /// Get the next backoff duration without advancing state
+    /// Returns the base duration without jitter for preview purposes
     pub fn peek(&self) -> Duration {
-        self.add_jitter(self.current)
+        self.current
     }
 
     /// Reset to initial backoff

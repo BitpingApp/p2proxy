@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest]
 
     steps:
       - name: Checkout repository
@@ -33,13 +33,8 @@ jobs:
 
       - name: Install Protocol Buffers Compiler
         run: |
-          if [[ "$RUNNER_OS" == "macOS" ]]; then
-            brew install protobuf
-          elif [[ "$RUNNER_OS" == "Linux" ]]; then
-            sudo apt-get update
-            sudo apt-get install -y protobuf-compiler
-          fi
-        shell: bash
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
 
       - name: Configure SSH and Cargo for GitLab
         run: |
@@ -117,13 +112,8 @@ jobs:
 
       - name: Install Protocol Buffers Compiler
         run: |
-          if [[ "$RUNNER_OS" == "macOS" ]]; then
-            brew install protobuf
-          elif [[ "$RUNNER_OS" == "Linux" ]]; then
-            sudo apt-get update
-            sudo apt-get install -y protobuf-compiler
-          fi
-        shell: bash
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
 
       - name: Configure SSH and Cargo for GitLab
         run: |
