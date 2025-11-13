@@ -47,6 +47,10 @@ pub struct PoolConfigOptions {
     #[serde(default = "default_open_timeout_secs")]
     pub open_timeout_secs: u64,
 
+    /// Timeout for acquiring semaphore permit in seconds (rate limiting)
+    #[serde(default)]
+    pub semaphore_timeout_secs: Option<u64>,
+
     /// Number of retry attempts for failed requests
     #[serde(default = "default_max_retries")]
     pub max_retries: u32,
@@ -69,6 +73,7 @@ impl std::hash::Hash for PoolConfigOptions {
         self.max_total.hash(state);
         self.idle_timeout_secs.hash(state);
         self.open_timeout_secs.hash(state);
+        self.semaphore_timeout_secs.hash(state);
         self.max_retries.hash(state);
         self.health_check_timeout_secs.hash(state);
         self.max_error_rate.to_bits().hash(state); // Convert f64 to u64 for hashing
@@ -82,6 +87,7 @@ impl PartialEq for PoolConfigOptions {
             && self.max_total == other.max_total
             && self.idle_timeout_secs == other.idle_timeout_secs
             && self.open_timeout_secs == other.open_timeout_secs
+            && self.semaphore_timeout_secs == other.semaphore_timeout_secs
             && self.max_retries == other.max_retries
             && self.health_check_timeout_secs == other.health_check_timeout_secs
             && self.max_error_rate.to_bits() == other.max_error_rate.to_bits()
@@ -104,6 +110,7 @@ impl Ord for PoolConfigOptions {
             .then_with(|| self.max_total.cmp(&other.max_total))
             .then_with(|| self.idle_timeout_secs.cmp(&other.idle_timeout_secs))
             .then_with(|| self.open_timeout_secs.cmp(&other.open_timeout_secs))
+            .then_with(|| self.semaphore_timeout_secs.cmp(&other.semaphore_timeout_secs))
             .then_with(|| self.max_retries.cmp(&other.max_retries))
             .then_with(|| self.health_check_timeout_secs.cmp(&other.health_check_timeout_secs))
             .then_with(|| self.max_error_rate.to_bits().cmp(&other.max_error_rate.to_bits()))
@@ -118,6 +125,7 @@ impl Default for PoolConfigOptions {
             max_total: default_max_total(),
             idle_timeout_secs: default_idle_timeout_secs(),
             open_timeout_secs: default_open_timeout_secs(),
+            semaphore_timeout_secs: None,  // Defaults to None for backward compatibility
             max_retries: default_max_retries(),
             health_check_timeout_secs: default_health_check_timeout_secs(),
             max_error_rate: default_max_error_rate(),

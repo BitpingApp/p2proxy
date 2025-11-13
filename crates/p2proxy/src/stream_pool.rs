@@ -16,8 +16,10 @@ use tracing::{debug, instrument};
 pub struct PoolConfig {
     /// Maximum concurrent streams per peer
     pub max_concurrent_per_peer: usize,
-    /// Timeout for opening a new stream
+    /// Timeout for opening a new stream (P2P network operation)
     pub stream_open_timeout: Duration,
+    /// Timeout for acquiring semaphore permit (rate limiting)
+    pub semaphore_timeout: Duration,
     /// Whether connection management is enabled (for rollback)
     pub enabled: bool,
     /// Maximum number of retry attempts
@@ -33,6 +35,7 @@ impl Default for PoolConfig {
         Self {
             max_concurrent_per_peer: 30,
             stream_open_timeout: Duration::from_secs(20),
+            semaphore_timeout: Duration::from_secs(5),
             enabled: true,
             max_retries: 3,
             health_check_timeout: Duration::from_secs(5),
@@ -46,6 +49,7 @@ impl From<&models::config::PoolConfigOptions> for PoolConfig {
         Self {
             max_concurrent_per_peer: opts.max_total,
             stream_open_timeout: Duration::from_secs(opts.open_timeout_secs),
+            semaphore_timeout: Duration::from_secs(opts.semaphore_timeout_secs.unwrap_or(5)),
             enabled: opts.enabled,
             max_retries: opts.max_retries,
             health_check_timeout: Duration::from_secs(opts.health_check_timeout_secs),
@@ -238,9 +242,9 @@ impl StreamPool {
             peer_conn.semaphore.clone()
         };
 
-        // Acquire semaphore permit to limit concurrent streams
+        // Acquire semaphore permit to limit concurrent streams (shorter timeout for rate limiting)
         let _permit = match tokio::time::timeout(
-            self.config.stream_open_timeout,
+            self.config.semaphore_timeout,
             semaphore.acquire(),
         )
         .await
@@ -248,12 +252,16 @@ impl StreamPool {
             Ok(Ok(p)) => p,
             Ok(Err(e)) => {
                 self.record_failure(peer).await;
+                counter!("p2proxy_stream_semaphore_acquire_errors_total").increment(1);
                 return Err(eyre!("Semaphore acquisition failed: {}", e));
             }
             Err(_) => {
-                counter!("p2proxy_stream_acquire_timeout_total").increment(1);
+                counter!("p2proxy_stream_semaphore_timeout_total").increment(1);
                 self.record_failure(peer).await;
-                return Err(eyre!("Timeout waiting for stream slot"));
+                return Err(eyre!(
+                    "Timeout waiting for stream slot (too many concurrent connections to peer {})",
+                    peer
+                ));
             }
         };
 
@@ -279,10 +287,12 @@ impl StreamPool {
         .await
         .map_err(|_| {
             self.record_failure_sync(peer);
-            eyre!("Timeout opening stream to peer {}", peer)
+            counter!("p2proxy_stream_open_timeout_total").increment(1);
+            eyre!("Timeout opening stream to peer {} (network timeout)", peer)
         })?
         .map_err(|e| {
             self.record_failure_sync(peer);
+            counter!("p2proxy_stream_open_errors_total").increment(1);
             eyre!("Failed to open stream to peer {}: {}", peer, e)
         })?;
 

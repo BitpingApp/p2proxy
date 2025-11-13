@@ -4,6 +4,7 @@ use std::{sync::LazyLock, time::Duration};
 
 use crate::proxy_protocols::socks_stream::{DataDirection, SocksStreamMessage};
 use crate::stream_pool::{PoolConfig, StreamPool};
+use crate::utils::backoff::ExponentialBackoff;
 use crate::utils::wait_ext::SwarmWaitExt;
 use crate::CONFIG;
 use crate::{proxy_protocols, GRPC_CHANNEL};
@@ -227,9 +228,14 @@ impl ProxyNetwork<NetworkConnect> {
 
         let bootstrap = multiaddr::multiaddr!(Dnsaddr("boot2.bitping.com"));
 
-        // Retry bootstrap connection until successful
+        // Retry bootstrap connection until successful with exponential backoff
         let mut bootstrap_retry_count = 0;
         const MAX_BOOTSTRAP_RETRIES: usize = 10;
+        let mut bootstrap_backoff = ExponentialBackoff::new(
+            Duration::from_secs(1),   // Initial: 1s
+            Duration::from_secs(30),  // Max: 30s
+            0.25,                     // ±25% jitter
+        );
 
         let bootstrap_peer_id = loop {
             match swarm.dial(bootstrap.clone()) {
@@ -249,7 +255,14 @@ impl ProxyNetwork<NetworkConnect> {
                         );
                     }
                     bootstrap_retry_count += 1;
-                    tokio::time::sleep(Duration::from_secs(2)).await;
+
+                    let backoff_duration = bootstrap_backoff.next();
+                    debug!("Retrying bootstrap after {:?}", backoff_duration);
+                    counter!("p2proxy_bootstrap_retry_total").increment(1);
+                    histogram!("p2proxy_bootstrap_backoff_duration_seconds")
+                        .record(backoff_duration.as_secs_f64());
+
+                    tokio::time::sleep(backoff_duration).await;
                     continue;
                 }
             }
@@ -299,11 +312,21 @@ impl ProxyNetwork<NetworkConnect> {
                         );
                     }
                     bootstrap_retry_count += 1;
-                    tokio::time::sleep(Duration::from_secs(2)).await;
+
+                    let backoff_duration = bootstrap_backoff.next();
+                    debug!("Retrying bootstrap after {:?}", backoff_duration);
+                    counter!("p2proxy_bootstrap_retry_total").increment(1);
+                    histogram!("p2proxy_bootstrap_backoff_duration_seconds")
+                        .record(backoff_duration.as_secs_f64());
+
+                    tokio::time::sleep(backoff_duration).await;
                     continue;
                 }
             }
         };
+
+        // Reset backoff on successful connection
+        bootstrap_backoff.reset();
 
         info!("Waiting for Relay reservation.");
 
@@ -388,6 +411,13 @@ impl ProxyNetwork<Bootstrapped> {
         let mut retry_count = 0;
         const MAX_RETRIES: usize = 20;
 
+        // Initialize exponential backoff for peer discovery
+        let mut discovery_backoff = ExponentialBackoff::new(
+            Duration::from_millis(500),  // Initial: 500ms
+            Duration::from_secs(30),     // Max: 30s
+            0.25,                        // ±25% jitter
+        );
+
         while retry_count < MAX_RETRIES {
             info!(
                 "Looking up peer (attempt {}/{})",
@@ -401,15 +431,31 @@ impl ProxyNetwork<Bootstrapped> {
                     if addresses.is_empty() {
                         warn!("No peer addresses discovered");
                         retry_count += 1;
-                        tokio::time::sleep(Duration::from_secs(1)).await;
+
+                        let backoff_duration = discovery_backoff.next();
+                        debug!("Retrying peer discovery after {:?}", backoff_duration);
+                        counter!("p2proxy_peer_discovery_retry_total").increment(1);
+                        histogram!("p2proxy_peer_discovery_backoff_duration_seconds")
+                            .record(backoff_duration.as_secs_f64());
+
+                        tokio::time::sleep(backoff_duration).await;
                         continue;
                     }
+                    // Reset backoff on successful discovery
+                    discovery_backoff.reset();
                     addresses
                 }
                 Err(e) => {
                     warn!(?e, "Failed to discover peer");
                     retry_count += 1;
-                    tokio::time::sleep(Duration::from_secs(1)).await;
+
+                    let backoff_duration = discovery_backoff.next();
+                    debug!("Retrying peer discovery after {:?}", backoff_duration);
+                    counter!("p2proxy_peer_discovery_retry_total").increment(1);
+                    histogram!("p2proxy_peer_discovery_backoff_duration_seconds")
+                        .record(backoff_duration.as_secs_f64());
+
+                    tokio::time::sleep(backoff_duration).await;
                     continue;
                 }
             };
