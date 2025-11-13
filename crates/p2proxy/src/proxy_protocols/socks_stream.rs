@@ -443,11 +443,22 @@ async fn handle_socks_connection(
         }
     }
 
-    // Clean up
+    // Clean up - log errors instead of silently ignoring
     // Make sure to flush the buffered writer before closing
-    let _ = socket_write.flush().await;
-    let _ = proxy_session.close().await;
-    let _ = socket_write.shutdown().await;
+    if let Err(e) = socket_write.flush().await {
+        warn!("Failed to flush socket during cleanup: {}", e);
+        counter!("p2proxy_socket_flush_cleanup_errors_total").increment(1);
+    }
+
+    if let Err(e) = proxy_session.close().await {
+        warn!("Failed to close proxy session during cleanup: {}", e);
+        counter!("p2proxy_session_close_cleanup_errors_total").increment(1);
+    }
+
+    if let Err(e) = socket_write.shutdown().await {
+        warn!("Failed to shutdown socket during cleanup: {}", e);
+        counter!("p2proxy_socket_shutdown_cleanup_errors_total").increment(1);
+    }
 
     let incoming_hash_bytes = incoming_hasher.finalize();
     let outgoing_hash_bytes = outgoing_hasher.finalize();
