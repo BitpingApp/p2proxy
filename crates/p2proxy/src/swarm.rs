@@ -154,7 +154,9 @@ impl ProxyNetwork<AuthStep> {
             .send_compressed(CompressionEncoding::Gzip)
             .accept_compressed(CompressionEncoding::Gzip);
 
-        let kp = KEYPAIR.clone().try_into_ed25519().unwrap();
+        let kp = KEYPAIR.clone()
+            .try_into_ed25519()
+            .map_err(|_| eyre!("Authentication requires Ed25519 keypair. Delete node_keypair.bin to regenerate."))?;
 
         let signed_msg = sha2::Sha256::digest(CONFIG.bitping_api_key.to_string());
         let signature = kp.sign(signed_msg.as_slice());

@@ -109,6 +109,85 @@ impl PeerConnection {
     }
 }
 
+/// RAII guard that automatically decrements active count on drop
+///
+/// This guard ensures the active stream counter is properly managed even if:
+/// - The stream open operation panics
+/// - An error occurs during acquisition
+/// - The function returns early
+struct StreamGuard {
+    peer: PeerId,
+    peers: Arc<RwLock<HashMap<PeerId, PeerConnection>>>,
+    /// If true, counter has already been handled (don't decrement in Drop)
+    already_handled: bool,
+}
+
+impl StreamGuard {
+    fn new(peer: PeerId, peers: Arc<RwLock<HashMap<PeerId, PeerConnection>>>) -> Self {
+        Self {
+            peer,
+            peers,
+            already_handled: false,
+        }
+    }
+
+    /// Mark as successful - prevents decrement on drop
+    ///
+    /// Call this when the stream is successfully opened and ownership
+    /// is transferred elsewhere. The counter will be decremented when
+    /// the stream is closed later.
+    fn mark_success(&mut self) {
+        self.already_handled = true;
+    }
+
+    /// Manually trigger failure decrement (for sync contexts)
+    ///
+    /// This is needed in contexts where we can't use async in Drop.
+    fn trigger_failure(&mut self) {
+        if !self.already_handled {
+            self.decrement_counter();
+            self.already_handled = true;
+        }
+    }
+
+    /// Decrement the counter (shared logic)
+    fn decrement_counter(&self) {
+        // Use try_write since this might be called from Drop
+        if let Ok(mut peers) = self.peers.try_write() {
+            if let Some(peer_conn) = peers.get_mut(&self.peer) {
+                if peer_conn.stats.current_active > 0 {
+                    peer_conn.stats.current_active -= 1;
+                }
+                gauge!("p2proxy_stream_pool_active_total", "peer" => self.peer.to_string())
+                    .set(peer_conn.stats.current_active as f64);
+            }
+        } else {
+            // Lock contention - log but don't block Drop
+            tracing::warn!(
+                "Could not acquire lock to decrement counter for peer {} in StreamGuard",
+                self.peer
+            );
+            counter!("p2proxy_stream_guard_lock_contention_total").increment(1);
+        }
+    }
+}
+
+impl Drop for StreamGuard {
+    fn drop(&mut self) {
+        if !self.already_handled {
+            // This runs on panic or error - decrement the counter
+            tracing::debug!(
+                "StreamGuard dropped without explicit handling - \
+                 decrementing active count for peer {}",
+                self.peer
+            );
+            counter!("p2proxy_stream_guard_auto_cleanup_total").increment(1);
+
+            self.decrement_counter();
+        }
+    }
+}
+
 /// Manages P2P stream connections with rate limiting and monitoring
 pub struct StreamPool {
     peers: Arc<RwLock<HashMap<PeerId, PeerConnection>>>,
@@ -156,9 +235,6 @@ impl StreamPool {
             let peer_conn = peers
                 .entry(peer)
                 .or_insert_with(|| PeerConnection::new(peer, self.config.max_concurrent_per_peer));
-            peer_conn.stats.current_active += 1;
-            gauge!("p2proxy_stream_pool_active_total", "peer" => peer.to_string())
-                .set(peer_conn.stats.current_active as f64);
             peer_conn.semaphore.clone()
         };
 
@@ -181,7 +257,20 @@ impl StreamPool {
             }
         };
 
-        // Open the stream
+        // Increment counter with RAII guard
+        let mut guard = {
+            let mut peers = self.peers.write().await;
+            let peer_conn = peers
+                .entry(peer)
+                .or_insert_with(|| PeerConnection::new(peer, self.config.max_concurrent_per_peer));
+            peer_conn.stats.current_active += 1;
+            gauge!("p2proxy_stream_pool_active_total", "peer" => peer.to_string())
+                .set(peer_conn.stats.current_active as f64);
+
+            StreamGuard::new(peer, self.peers.clone())
+        };
+
+        // Open the stream - guard will auto-decrement if this fails/panics
         let mut control = self.control.clone();
         let stream = tokio::time::timeout(
             self.config.stream_open_timeout,
@@ -196,6 +285,9 @@ impl StreamPool {
             self.record_failure_sync(peer);
             eyre!("Failed to open stream to peer {}: {}", peer, e)
         })?;
+
+        // Mark guard as successful (prevents auto-decrement on drop)
+        guard.mark_success();
 
         // Record success
         self.record_success(peer).await;

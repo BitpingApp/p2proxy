@@ -119,42 +119,91 @@ async fn handle_swarm_events(
 }
 
 const TCP_PORT: u16 = 9876;
+const MAX_CONSECUTIVE_ERRORS: u32 = 10;
+
 async fn start_server(server_state: Arc<RwLock<ServerContainer>>) -> Result<()> {
     use remoc::ConnectExt;
-    // Create a counter object that will be shared between all clients.
-    // You could also create one counter object per connection.
+    use std::time::{Duration, Instant};
 
-    // Listen to TCP connections using Tokio.
-    // In reality you would probably use TLS or WebSockets over HTTPS.
     println!("Listening on port {}. Press Ctrl+C to exit.", TCP_PORT);
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, TCP_PORT)).await?;
 
+    let mut consecutive_errors = 0;
+    let mut last_success = Instant::now();
+
     loop {
-        // Accept an incoming TCP connection.
-        let (socket, addr) = listener.accept().await.unwrap();
+        // Accept an incoming TCP connection with error handling
+        let (socket, addr) = match listener.accept().await {
+            Ok(conn) => {
+                consecutive_errors = 0;  // Reset on success
+                last_success = Instant::now();
+                metrics::gauge!("p2proxy_rpc_consecutive_accept_errors").set(0.0);
+                conn
+            }
+            Err(e) => {
+                consecutive_errors += 1;
+                metrics::counter!("p2proxy_rpc_accept_errors_total").increment(1);
+                metrics::gauge!("p2proxy_rpc_consecutive_accept_errors")
+                    .set(consecutive_errors as f64);
+
+                if consecutive_errors > MAX_CONSECUTIVE_ERRORS {
+                    tracing::error!(
+                        "Too many consecutive accept errors ({}) - last success {:?} ago. \
+                         This may indicate system-level issues (file descriptors, permissions). \
+                         Error: {}",
+                        consecutive_errors,
+                        last_success.elapsed(),
+                        e
+                    );
+                    // Longer backoff when many consecutive errors
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                } else {
+                    tracing::error!("Failed to accept RPC connection: {}", e);
+                    // Brief backoff for transient errors
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                continue;
+            }
+        };
+
         let (socket_rx, socket_tx) = socket.into_split();
-        println!("Accepted connection from {}", addr);
+        tracing::debug!("Accepted RPC connection from {}", addr);
         let counter_obj = server_state.clone();
 
-        // Spawn a task for each incoming connection.
+        // Spawn a task for each incoming connection
         tokio::spawn(async move {
-            // Create a server proxy and client for the accepted connection.
-            //
-            // The server proxy executes all incoming method calls on the shared counter_obj
-            // with a request queue length of 1.
-            //
-            // Current limitations of the Rust compiler require that we explicitly
-            // specify the codec.
             let (server, client) =
                 CounterServerSharedMut::<_, remoc::codec::Postcard>::new(counter_obj, 1);
 
-            remoc::Connect::io(remoc::Cfg::default(), socket_rx, socket_tx)
+            // Handle remoc connection with error handling (no panic)
+            match remoc::Connect::io(remoc::Cfg::default(), socket_rx, socket_tx)
                 .provide(client)
                 .await
-                .unwrap();
+            {
+                Ok(_connection) => {
+                    tracing::info!("Established RPC connection from {}", addr);
+                    metrics::counter!("p2proxy_rpc_connections_total").increment(1);
+                    metrics::gauge!("p2proxy_rpc_active_connections").increment(1.0);
 
-            tracing::info!("Serving database connection {}", addr);
-            server.serve(true).await
+                    // Serve the connection
+                    if let Err(e) = server.serve(true).await {
+                        tracing::warn!("RPC server error for {}: {}", addr, e);
+                        metrics::counter!("p2proxy_rpc_serve_errors_total").increment(1);
+                    }
+
+                    metrics::gauge!("p2proxy_rpc_active_connections").decrement(1.0);
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to establish remoc connection from {}. \
+                         This could indicate malformed client or incompatible codec. \
+                         Error: {}",
+                        addr,
+                        e
+                    );
+                    metrics::counter!("p2proxy_rpc_connection_errors_total").increment(1);
+                }
+            }
         });
     }
 }
