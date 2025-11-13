@@ -234,7 +234,8 @@ async fn bootstrap_with_exponential_backoff(
                 // Exponential backoff with jitter
                 let backoff_ms = (INITIAL_BACKOFF_MS * 2_u64.pow(retry_count as u32))
                     .min(MAX_BACKOFF_MS);
-                let jitter = rand::thread_rng().gen_range(0..backoff_ms / 4);
+                // Use fastrand for async compatibility (Send-safe)
+                let jitter = fastrand::u64(0..backoff_ms / 4);
                 let sleep_duration = Duration::from_millis(backoff_ms + jitter);
 
                 info!("Retrying bootstrap in {:?}", sleep_duration);
@@ -273,7 +274,8 @@ async fn bootstrap_with_exponential_backoff(
                 // Exponential backoff
                 let backoff_ms = (INITIAL_BACKOFF_MS * 2_u64.pow(retry_count as u32))
                     .min(MAX_BACKOFF_MS);
-                let jitter = rand::thread_rng().gen_range(0..backoff_ms / 4);
+                // Use fastrand for async compatibility (Send-safe)
+                let jitter = fastrand::u64(0..backoff_ms / 4);
                 tokio::time::sleep(Duration::from_millis(backoff_ms + jitter)).await;
                 retry_count += 1;
             }
@@ -1117,7 +1119,14 @@ log_error(socket.shutdown().await, "socket_shutdown");
 
 **Systemic Fix:**
 - Create reusable backoff utility
+
+**Note**: For the complete async-compatible implementation with `StdRng` (Send-safe), see:
+- **Improvement 1** (§5.4 below) for full implementation
+- **Technical Corrections Document** (§7) for detailed explanation
+
 ```rust
+use fastrand;  // Simple async-safe alternative
+
 pub struct ExponentialBackoff {
     current: Duration,
     initial: Duration,
@@ -1139,9 +1148,9 @@ impl ExponentialBackoff {
         let backoff = self.current;
         self.current = (self.current * self.multiplier).min(self.max);
 
-        // Add jitter (±25%)
-        let jitter_range = backoff.as_millis() / 4;
-        let jitter = rand::thread_rng().gen_range(0..jitter_range) as u64;
+        // Add jitter (±25%) using fastrand (async-safe)
+        let jitter_range = backoff.as_millis() as u64 / 4;
+        let jitter = fastrand::u64(0..jitter_range);
         backoff + Duration::from_millis(jitter)
     }
 
@@ -1351,16 +1360,20 @@ See detailed fix in Pattern 4 above.
 //! Provides configurable exponential backoff for retry logic.
 
 use std::time::Duration;
-use rand::Rng;
+use rand::{Rng, SeedableRng};
+use rand::rngs::StdRng;
 
 /// Exponential backoff calculator with jitter
-#[derive(Debug, Clone)]
+///
+/// Uses `StdRng` for async compatibility (Send-safe).
+#[derive(Debug)]
 pub struct ExponentialBackoff {
     current: Duration,
     initial: Duration,
     max: Duration,
     multiplier: u32,
     jitter_pct: f64,
+    rng: StdRng,  // ← Send-safe RNG for async contexts
 }
 
 impl ExponentialBackoff {
@@ -1386,6 +1399,19 @@ impl ExponentialBackoff {
             max,
             multiplier: 2,
             jitter_pct: jitter_pct.clamp(0.0, 1.0),
+            rng: StdRng::from_entropy(),  // Seed from system entropy
+        }
+    }
+
+    /// Create backoff with explicit seed (for deterministic testing)
+    pub fn with_seed(initial: Duration, max: Duration, jitter_pct: f64, seed: u64) -> Self {
+        Self {
+            current: initial,
+            initial,
+            max,
+            multiplier: 2,
+            jitter_pct: jitter_pct.clamp(0.0, 1.0),
+            rng: StdRng::seed_from_u64(seed),
         }
     }
 
@@ -1410,16 +1436,20 @@ impl ExponentialBackoff {
         self.current = self.initial;
     }
 
-    fn add_jitter(&self, base: Duration) -> Duration {
+    fn add_jitter(&mut self, base: Duration) -> Duration {
         if self.jitter_pct == 0.0 {
             return base;
         }
 
         let jitter_range = (base.as_millis() as f64 * self.jitter_pct) as u64;
-        let jitter = rand::thread_rng().gen_range(0..=jitter_range);
+        if jitter_range == 0 {
+            return base;
+        }
 
-        // Jitter can be positive or negative
-        if rand::thread_rng().gen_bool(0.5) {
+        let jitter = self.rng.gen_range(0..=jitter_range);
+
+        // Jitter can be positive or negative (50% chance)
+        if self.rng.gen_bool(0.5) {
             base + Duration::from_millis(jitter)
         } else {
             base.saturating_sub(Duration::from_millis(jitter))
@@ -1436,6 +1466,10 @@ impl Default for ExponentialBackoff {
         )
     }
 }
+
+// StdRng is Send, so ExponentialBackoff is Send
+// This allows it to be used safely in async contexts
+unsafe impl Send for ExponentialBackoff {}
 
 #[cfg(test)]
 mod tests {
