@@ -45,7 +45,7 @@ impl ExponentialBackoff {
             max,
             multiplier: 2,
             jitter_pct: jitter_pct.clamp(0.0, 1.0),
-            rng: StdRng::from_entropy(),  // Seed from system entropy
+            rng: SeedableRng::from_entropy(),  // Seed from system entropy
         }
     }
 
@@ -93,10 +93,10 @@ impl ExponentialBackoff {
             return base;
         }
 
-        let jitter = self.rng.gen_range(0..=jitter_range);
+        let jitter = self.rng.random_range(0..=jitter_range);
 
         // Jitter can be positive or negative (50% chance)
-        if self.rng.gen_bool(0.5) {
+        if self.rng.random_bool(0.5) {
             base + Duration::from_millis(jitter)
         } else {
             base.saturating_sub(Duration::from_millis(jitter))
@@ -114,9 +114,7 @@ impl Default for ExponentialBackoff {
     }
 }
 
-// StdRng is Send, so ExponentialBackoff is Send
-// This allows it to be used safely in async contexts
-unsafe impl Send for ExponentialBackoff {}
+// Note: StdRng implements Send, so ExponentialBackoff automatically implements Send
 
 #[cfg(test)]
 mod tests {

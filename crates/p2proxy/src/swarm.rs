@@ -26,7 +26,7 @@ use libp2p::{
     tcp, yamux, PeerId, Swarm,
 };
 use libp2p_stream as stream;
-use metrics::{counter, gauge};
+use metrics::{counter, gauge, histogram};
 use models::config::Server;
 use models::events::Events;
 use models::{Counter, ServerContainer, ServerState};
