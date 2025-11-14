@@ -83,6 +83,7 @@ impl ExponentialBackoff {
         self.current = self.initial;
     }
 
+    #[allow(deprecated)]  // gen_range/gen_bool deprecated in rand 0.9+, but current version needs them
     fn add_jitter(&mut self, base: Duration) -> Duration {
         if self.jitter_pct == 0.0 {
             return base;
@@ -93,10 +94,10 @@ impl ExponentialBackoff {
             return base;
         }
 
-        let jitter = self.rng.random_range(0..=jitter_range);
+        let jitter = self.rng.gen_range(0..=jitter_range);
 
         // Jitter can be positive or negative (50% chance)
-        if self.rng.random_bool(0.5) {
+        if self.rng.gen_bool(0.5) {
             base + Duration::from_millis(jitter)
         } else {
             base.saturating_sub(Duration::from_millis(jitter))
