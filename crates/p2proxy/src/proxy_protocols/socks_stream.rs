@@ -260,7 +260,8 @@ async fn handle_socks_connection(
     counter!("p2proxy_socks_connections_established_total").increment(1);
 
     // Acquire a stream from the pool (pool handles rate limiting and timeouts)
-    let stream = match stream_pool.acquire_stream(peer).await {
+    // The permit MUST be held for the entire session duration (until this function returns)
+    let (stream, _permit) = match stream_pool.acquire_stream(peer).await {
         Ok(s) => s,
         Err(e) => {
             counter!("p2proxy_stream_acquire_failed_total").increment(1);

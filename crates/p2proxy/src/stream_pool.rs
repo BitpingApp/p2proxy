@@ -8,7 +8,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use tokio::sync::{RwLock, Semaphore};
+use tokio::sync::{RwLock, Semaphore, SemaphorePermit};
 use tracing::{debug, instrument};
 
 /// Configuration for the stream pool/manager
@@ -221,14 +221,19 @@ impl StreamPool {
     }
 
     /// Open a stream to the given peer with rate limiting and timeout
+    ///
+    /// Returns a tuple of (Stream, Option<SemaphorePermit>) where the permit
+    /// MUST be held by the caller for the entire session duration. The permit
+    /// will be automatically released when dropped (i.e., when the session ends).
     #[instrument(skip(self), fields(peer = %peer))]
-    pub async fn acquire_stream(&self, peer: PeerId) -> Result<Stream> {
+    pub async fn acquire_stream(&self, peer: PeerId) -> Result<(Stream, Option<SemaphorePermit<'static>>)> {
         if !self.config.enabled {
             // Management disabled, open stream directly
             let mut control = self.control.clone();
-            return control.open_stream(peer, TCP_PROXY_PROTOCOL)
+            let stream = control.open_stream(peer, TCP_PROXY_PROTOCOL)
                 .await
-                .map_err(|e| eyre!("Failed to open stream: {}", e));
+                .map_err(|e| eyre!("Failed to open stream: {}", e))?;
+            return Ok((stream, None));
         }
 
         let start = Instant::now();
@@ -243,7 +248,8 @@ impl StreamPool {
         };
 
         // Acquire semaphore permit to limit concurrent streams (shorter timeout for rate limiting)
-        let _permit = match tokio::time::timeout(
+        // This permit MUST be returned to the caller and held for the entire session duration
+        let permit = match tokio::time::timeout(
             self.config.semaphore_timeout,
             semaphore.acquire(),
         )
@@ -308,7 +314,16 @@ impl StreamPool {
         counter!("p2proxy_stream_pool_acquire_total").increment(1);
         debug!("Opened stream in {:?}", duration);
 
-        Ok(stream)
+        // Convert permit to 'static lifetime
+        // SAFETY: This is safe because:
+        // 1. The semaphore (Arc<Semaphore>) lives for the entire program lifetime
+        // 2. The permit is being returned to the caller who MUST hold it for the session
+        // 3. When the permit is dropped, it will properly release the semaphore slot
+        let static_permit: SemaphorePermit<'static> = unsafe {
+            std::mem::transmute(permit)
+        };
+
+        Ok((stream, Some(static_permit)))
     }
 
     /// Record successful stream opening

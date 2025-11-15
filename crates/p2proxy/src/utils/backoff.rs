@@ -45,7 +45,7 @@ impl ExponentialBackoff {
             max,
             multiplier: 2,
             jitter_pct: jitter_pct.clamp(0.0, 1.0),
-            rng: SeedableRng::from_entropy(),  // Seed from system entropy
+            rng: StdRng::from_seed(rand::random()),  // Seed from system entropy
         }
     }
 
