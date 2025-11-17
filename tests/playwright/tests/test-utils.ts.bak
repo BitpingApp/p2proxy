@@ -96,7 +96,7 @@ export interface ProxyVerificationResult {
  */
 export async function verifyProxyUsage(page: Page): Promise<ProxyVerificationResult> {
   try {
-    await page.goto('http://httpbin.org/get', {
+    await page.goto('https://httpbin.org/get', {
       waitUntil: 'domcontentloaded',
       timeout: TIMEOUTS.PAGE_LOAD,
     });

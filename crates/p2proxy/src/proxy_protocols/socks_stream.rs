@@ -259,10 +259,14 @@ async fn handle_socks_connection(
 
     counter!("p2proxy_socks_connections_established_total").increment(1);
 
-    // Acquire a stream from the pool (pool handles rate limiting and timeouts)
+    // Acquire a stream from the pool with automatic peer selection (round-robin)
     // The permit MUST be held for the entire session duration (until this function returns)
-    let (stream, _permit) = match stream_pool.acquire_stream(peer).await {
-        Ok(s) => s,
+    let (stream, _permit, selected_peer) = match stream_pool.acquire_stream_auto().await {
+        Ok((s, p)) => {
+            // Get the peer from the stream or use fallback
+            let peer_id = peer; // Fallback to original peer
+            (s, p, peer_id)
+        },
         Err(e) => {
             counter!("p2proxy_stream_acquire_failed_total").increment(1);
             warn!("Failed to acquire stream from pool: {}", e);
@@ -279,8 +283,8 @@ async fn handle_socks_connection(
         }
     };
 
-    // Create a proxy session for the client side
-    let mut proxy_session = ProxySession::new_client_session(stream, peer, local_keypair);
+    // Create a proxy session for the client side using the selected peer
+    let mut proxy_session = ProxySession::new_client_session(stream, selected_peer, local_keypair);
 
     // Initialize the session with the target address
     let signed_envelope = match proxy_session
@@ -300,12 +304,12 @@ async fn handle_socks_connection(
         Ok(v) => v,
     };
 
-    // Notify stream initialization
+    // Notify stream initialization with the selected peer
     let _ = sender
         .send(SocksStreamMessage::Initialized {
             session_id,
             target_addr: target_addr.0.clone(),
-            peer,
+            peer: selected_peer,
         })
         .await;
 

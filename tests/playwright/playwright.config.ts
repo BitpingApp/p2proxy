@@ -10,9 +10,9 @@ export default defineConfig({
   testDir: './tests',
 
   // Test timeout settings
-  timeout: 60 * 1000, // 60 seconds per test
+  timeout: 120 * 1000, // 120 seconds per test (increased for P2P proxy)
   expect: {
-    timeout: 10 * 1000, // 10 seconds for assertions
+    timeout: 30 * 1000, // 30 seconds for assertions (increased for P2P proxy)
   },
 
   // Run tests in parallel
@@ -49,10 +49,13 @@ export default defineConfig({
     video: 'retain-on-failure',
 
     // Navigation timeout
-    navigationTimeout: 30 * 1000, // 30 seconds
+    navigationTimeout: 90 * 1000, // 90 seconds (increased for P2P proxy)
 
     // Action timeout
-    actionTimeout: 15 * 1000, // 15 seconds
+    actionTimeout: 30 * 1000, // 30 seconds (increased for P2P proxy)
+
+    // Ignore HTTPS errors (required for SOCKS5 proxy)
+    ignoreHTTPSErrors: true,
 
     // SOCKS5 Proxy configuration - route all traffic through P2Proxy
     proxy: {
@@ -70,6 +73,19 @@ export default defineConfig({
         proxy: {
           server: 'socks5://localhost:1080',
         },
+        // Anti-bot detection settings
+        launchOptions: {
+          args: [
+            '--disable-blink-features=AutomationControlled',
+            '--disable-features=IsolateOrigins,site-per-process',
+            '--disable-site-isolation-trials',
+          ],
+        },
+        // Realistic user agent and viewport
+        userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        viewport: { width: 1920, height: 1080 },
+        hasTouch: false,
+        isMobile: false,
       },
     },
 

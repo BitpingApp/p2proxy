@@ -19,7 +19,7 @@ test.describe('Proxy Verification', () => {
 
   test('should successfully connect through proxy', async ({ page }) => {
     // Use httpbin.org to verify connection details
-    await gotoWithCookieHandling(page, 'http://httpbin.org/get');
+    await gotoWithCookieHandling(page, 'https://httpbin.org/get');
 
     // Verify we got a response
     const body = await page.locator('body').textContent();
@@ -33,7 +33,7 @@ test.describe('Proxy Verification', () => {
 
   test('should handle HTTPS through proxy', async ({ page }) => {
     // Verify HTTPS works through SOCKS5
-    await gotoWithCookieHandling(page, 'http://httpbin.org/status/200');
+    await gotoWithCookieHandling(page, 'https://httpbin.org/status/200');
 
     // Should successfully load
     const body = await page.locator('body').isVisible();
@@ -81,7 +81,7 @@ test.describe('Proxy Verification', () => {
   });
 
   test('should preserve headers through proxy', async ({ page }) => {
-    await gotoWithCookieHandling(page, 'http://httpbin.org/headers');
+    await gotoWithCookieHandling(page, 'https://httpbin.org/headers');
 
     const body = await page.locator('body').textContent();
     expect(body).toBeTruthy();
@@ -91,7 +91,7 @@ test.describe('Proxy Verification', () => {
   });
 
   test('should handle cookies through proxy', async ({ page }) => {
-    await gotoWithCookieHandling(page, 'http://httpbin.org/cookies/set?test=proxy_value');
+    await gotoWithCookieHandling(page, 'https://httpbin.org/cookies/set?test=proxy_value');
 
     // Get cookies
     const cookies = await page.context().cookies();
@@ -122,7 +122,7 @@ test.describe('Proxy Verification', () => {
 
       // Navigate concurrently to different endpoints
       const navigations = pages.map((page, index) =>
-        gotoWithCookieHandling(page, `http://httpbin.org/delay/${index}`)
+        gotoWithCookieHandling(page, `https://httpbin.org/delay/${index}`)
       );
 
       // All should complete successfully

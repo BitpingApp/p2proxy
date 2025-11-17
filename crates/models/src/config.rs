@@ -62,6 +62,14 @@ pub struct PoolConfigOptions {
     /// Maximum error rate before triggering failover (0.0-1.0)
     #[serde(default = "default_max_error_rate")]
     pub max_error_rate: f64,
+
+    /// Maximum number of peers to connect to for load balancing
+    #[serde(default = "default_max_peers")]
+    pub max_peers: usize,
+
+    /// Timeout for peer connection establishment in seconds
+    #[serde(default = "default_peer_connection_timeout_secs")]
+    pub peer_connection_timeout_secs: u64,
 }
 
 // Manual implementations of Hash, Eq, PartialEq, Ord, PartialOrd for PoolConfigOptions
@@ -77,6 +85,8 @@ impl std::hash::Hash for PoolConfigOptions {
         self.max_retries.hash(state);
         self.health_check_timeout_secs.hash(state);
         self.max_error_rate.to_bits().hash(state); // Convert f64 to u64 for hashing
+        self.max_peers.hash(state);
+        self.peer_connection_timeout_secs.hash(state);
     }
 }
 
@@ -91,6 +101,8 @@ impl PartialEq for PoolConfigOptions {
             && self.max_retries == other.max_retries
             && self.health_check_timeout_secs == other.health_check_timeout_secs
             && self.max_error_rate.to_bits() == other.max_error_rate.to_bits()
+            && self.max_peers == other.max_peers
+            && self.peer_connection_timeout_secs == other.peer_connection_timeout_secs
     }
 }
 
@@ -114,6 +126,8 @@ impl Ord for PoolConfigOptions {
             .then_with(|| self.max_retries.cmp(&other.max_retries))
             .then_with(|| self.health_check_timeout_secs.cmp(&other.health_check_timeout_secs))
             .then_with(|| self.max_error_rate.to_bits().cmp(&other.max_error_rate.to_bits()))
+            .then_with(|| self.max_peers.cmp(&other.max_peers))
+            .then_with(|| self.peer_connection_timeout_secs.cmp(&other.peer_connection_timeout_secs))
     }
 }
 
@@ -129,6 +143,8 @@ impl Default for PoolConfigOptions {
             max_retries: default_max_retries(),
             health_check_timeout_secs: default_health_check_timeout_secs(),
             max_error_rate: default_max_error_rate(),
+            max_peers: default_max_peers(),
+            peer_connection_timeout_secs: default_peer_connection_timeout_secs(),
         }
     }
 }
@@ -163,6 +179,14 @@ fn default_health_check_timeout_secs() -> u64 {
 
 fn default_max_error_rate() -> f64 {
     0.15
+}
+
+fn default_max_peers() -> usize {
+    12
+}
+
+fn default_peer_connection_timeout_secs() -> u64 {
+    20
 }
 
 #[derive(Serialize, Deserialize, Debug, Hash, Eq, PartialEq, PartialOrd, Ord, Clone)]

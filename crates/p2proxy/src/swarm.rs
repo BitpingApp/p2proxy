@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::{sync::LazyLock, time::Duration};
+use std::{sync::LazyLock, time::{Duration, Instant}};
 
 use crate::proxy_protocols::socks_stream::{DataDirection, SocksStreamMessage};
 use crate::stream_pool::{PoolConfig, StreamPool};
@@ -384,24 +384,99 @@ impl ProxyNetwork<NetworkConnect> {
 
 impl ProxyNetwork<Bootstrapped> {
     pub async fn configure_server(&mut self, server: &'static Server) -> Result<()> {
-        let destination_peer_id = self.discover_and_connect_to_peer(server).await?;
+        // Discover and connect to ALL available peers for load balancing
+        let peer_ids = self.discover_and_connect_to_peers(server).await?;
 
         info!(
-            ?destination_peer_id,
-            "Connection established with destination peer"
+            peer_count = peer_ids.len(),
+            "Connections established with destination peers for load balancing"
         );
+
+        // Add all peers to the stream pool for round-robin selection
+        for peer_id in &peer_ids {
+            self.0.stream_pool.add_peer(*peer_id).await;
+        }
+
+        // Use first peer as fallback for backward compatibility
+        let first_peer = peer_ids.into_iter().next()
+            .ok_or_else(|| eyre!("No peers available"))?;
 
         proxy_protocols::socks_stream::create_socks_proxy_stream(
             server,
             &KEYPAIR,
             self.0.token.to_string(),
-            destination_peer_id,
+            first_peer,
             self.0.stream_pool.clone(),
             self.0.proxy_message_channel.0.clone(),
         )
         .await?;
 
         Ok(())
+    }
+
+    /// Discover and connect to multiple peers for load balancing
+    async fn discover_and_connect_to_peers(
+        &mut self,
+        server: &Server,
+    ) -> Result<Vec<PeerId>, color_eyre::eyre::Error> {
+        let destination_addresses = self.discover_peer(server).await?;
+        info!("Successfully discovered {} peer addresses", destination_addresses.len());
+
+        // Dial all discovered peers
+        let mut peer_ids = Vec::new();
+        for multiaddr in &destination_addresses {
+            match self.0.swarm.dial(multiaddr.clone()) {
+                Ok(_) => {
+                    debug!("Dialing peer at {}", multiaddr);
+                }
+                Err(e) => {
+                    warn!("Failed to dial {}: {}", multiaddr, e);
+                }
+            }
+        }
+
+        // Wait for connections to establish (use configured max_peers and timeout)
+        let max_peers = server.pool.max_peers;
+        let timeout_secs = server.pool.peer_connection_timeout_secs;
+        let start = Instant::now();
+        let timeout = Duration::from_secs(timeout_secs);
+
+        while peer_ids.len() < max_peers && start.elapsed() < timeout {
+            match tokio::time::timeout(
+                Duration::from_secs(2),
+                self.0.swarm.wait_for(|_swarm, event| match event {
+                    SwarmEvent::ConnectionEstablished {
+                        peer_id,
+                        connection_id,
+                        ..
+                    } => {
+                        // Only count if this peer is in our destination set
+                        Some(*peer_id)
+                    }
+                    _ => None,
+                }),
+            )
+            .await
+            {
+                Ok(peer_id) => {
+                    if !peer_ids.contains(&peer_id) {
+                        peer_ids.push(peer_id);
+                        info!("Connected to peer {}/{}: {}", peer_ids.len(), destination_addresses.len(), peer_id);
+                    }
+                }
+                Err(_) => {
+                    debug!("Timeout waiting for peer connection");
+                    break;
+                }
+            }
+        }
+
+        if peer_ids.is_empty() {
+            return Err(eyre!("Failed to connect to any peers"));
+        }
+
+        info!("Successfully connected to {} peers", peer_ids.len());
+        Ok(peer_ids)
     }
 
     async fn discover_and_connect_to_peer(

@@ -9,7 +9,7 @@ import { measurePageLoadTime, TIMEOUTS, gotoWithCookieHandling } from './test-ut
 test.describe('Proxy Feature Tests', () => {
   test('should handle different HTTP methods', async ({ page }) => {
     // Test GET requests
-    await gotoWithCookieHandling(page, 'http://httpbin.org/get');
+    await gotoWithCookieHandling(page, 'https://httpbin.org/get');
 
     const body = await page.locator('body').textContent();
     expect(body).toContain('httpbin.org');
@@ -20,7 +20,7 @@ test.describe('Proxy Feature Tests', () => {
   });
 
   test('should handle POST requests', async ({ page }) => {
-    await gotoWithCookieHandling(page, 'http://httpbin.org/forms/post');
+    await gotoWithCookieHandling(page, 'https://httpbin.org/forms/post');
 
     // Fill out a simple form if available
     const form = page.locator('form').first();
@@ -31,7 +31,7 @@ test.describe('Proxy Feature Tests', () => {
   });
 
   test('should preserve headers through proxy', async ({ page }) => {
-    await gotoWithCookieHandling(page, 'http://httpbin.org/headers');
+    await gotoWithCookieHandling(page, 'https://httpbin.org/headers');
 
     const body = await page.locator('body').textContent();
 
@@ -42,7 +42,7 @@ test.describe('Proxy Feature Tests', () => {
 
   test('should handle redirects correctly', async ({ page }) => {
     // Test 301 redirect
-    await gotoWithCookieHandling(page, 'http://httpbin.org/redirect/1');
+    await gotoWithCookieHandling(page, 'https://httpbin.org/redirect/1');
 
     // Should end up at /get
     await page.waitForTimeout(2000);
@@ -53,7 +53,7 @@ test.describe('Proxy Feature Tests', () => {
 
   test('should handle large responses', async ({ page }) => {
     // Request a large response (1000 bytes)
-    await gotoWithCookieHandling(page, 'http://httpbin.org/bytes/1000');
+    await gotoWithCookieHandling(page, 'https://httpbin.org/bytes/1000');
 
     // Verify we got content
     const body = await page.locator('body').textContent();
@@ -62,7 +62,7 @@ test.describe('Proxy Feature Tests', () => {
   });
 
   test('should handle gzip compression', async ({ page }) => {
-    await gotoWithCookieHandling(page, 'http://httpbin.org/gzip');
+    await gotoWithCookieHandling(page, 'https://httpbin.org/gzip');
 
     const body = await page.locator('body').textContent();
 
@@ -72,7 +72,7 @@ test.describe('Proxy Feature Tests', () => {
   });
 
   test('should handle cookies', async ({ page }) => {
-    await gotoWithCookieHandling(page, 'http://httpbin.org/cookies/set?test=value');
+    await gotoWithCookieHandling(page, 'https://httpbin.org/cookies/set?test=value');
 
     // Get cookies
     const cookies = await page.context().cookies();

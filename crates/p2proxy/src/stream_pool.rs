@@ -9,7 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::{RwLock, Semaphore, SemaphorePermit};
-use tracing::{debug, instrument};
+use tracing::{debug, instrument, warn};
 
 /// Configuration for the stream pool/manager
 #[derive(Debug, Clone)]
@@ -71,6 +71,10 @@ struct PeerStats {
     last_health_check: Option<Instant>,
     /// Whether peer is currently healthy
     is_healthy: bool,
+    /// Exponential moving average of response times (in seconds)
+    avg_response_time: f64,
+    /// Total number of response time samples
+    response_time_samples: u64,
 }
 
 /// Per-peer connection tracking
@@ -197,6 +201,10 @@ pub struct StreamPool {
     peers: Arc<RwLock<HashMap<PeerId, PeerConnection>>>,
     control: stream::Control,
     config: PoolConfig,
+    /// Available peer list for load balancing
+    available_peers: Arc<RwLock<Vec<PeerId>>>,
+    /// Round-robin counter for peer selection
+    round_robin_counter: Arc<RwLock<usize>>,
 }
 
 impl StreamPool {
@@ -209,6 +217,8 @@ impl StreamPool {
             peers: Arc::new(RwLock::new(HashMap::new())),
             control,
             config,
+            available_peers: Arc::new(RwLock::new(Vec::new())),
+            round_robin_counter: Arc::new(RwLock::new(0)),
         });
 
         // Start background metrics task
@@ -218,6 +228,169 @@ impl StreamPool {
         });
 
         pool
+    }
+
+    /// Add a peer to the available peer list for load balancing
+    pub async fn add_peer(&self, peer: PeerId) {
+        let mut peers = self.available_peers.write().await;
+        if !peers.contains(&peer) {
+            peers.push(peer);
+            debug!("Added peer {} to pool (total: {})", peer, peers.len());
+        }
+    }
+
+    /// Select next peer using health-based weighted strategy
+    ///
+    /// Peer selection algorithm:
+    /// 1. Filter out unhealthy peers (high error rate)
+    /// 2. Calculate health score for each peer based on:
+    ///    - Error rate (lower is better)
+    ///    - Response time (faster is better)
+    /// 3. Prefer peers with higher health scores
+    /// 4. Fall back to round-robin if health data unavailable
+    async fn select_peer_round_robin(&self) -> Result<PeerId> {
+        let available_peers = self.available_peers.read().await;
+        if available_peers.is_empty() {
+            return Err(eyre!("No peers available in pool"));
+        }
+
+        let peer_stats = self.peers.read().await;
+
+        // Calculate health scores for each peer
+        let mut peer_scores: Vec<(PeerId, f64)> = Vec::new();
+
+        for &peer in available_peers.iter() {
+            if let Some(peer_conn) = peer_stats.get(&peer) {
+                // Skip unhealthy peers unless all peers are unhealthy
+                if !peer_conn.stats.is_healthy && peer_scores.len() > 0 {
+                    continue;
+                }
+
+                let error_rate = peer_conn.error_rate();
+                let response_time = peer_conn.stats.avg_response_time;
+
+                // Calculate health score (higher is better)
+                // Score components:
+                // 1. Error rate penalty: (1.0 - error_rate) gives 1.0 for 0% errors, 0.0 for 100% errors
+                // 2. Response time penalty: 1.0 / (1.0 + response_time) gives higher scores for faster peers
+                //    - 0ms response = 1.0
+                //    - 1s response = 0.5
+                //    - 5s response = 0.17
+                // Weight: 70% error rate, 30% response time
+                let error_score = (1.0 - error_rate).max(0.0);
+                let response_score = if response_time > 0.0 {
+                    1.0 / (1.0 + response_time)
+                } else {
+                    1.0  // No data yet, give benefit of doubt
+                };
+
+                let health_score = 0.7 * error_score + 0.3 * response_score;
+                peer_scores.push((peer, health_score));
+            } else {
+                // No stats yet, give new peer a decent score
+                peer_scores.push((peer, 0.8));
+            }
+        }
+
+        // If all peers are unhealthy, allow them back in
+        if peer_scores.is_empty() {
+            for &peer in available_peers.iter() {
+                if let Some(peer_conn) = peer_stats.get(&peer) {
+                    let error_rate = peer_conn.error_rate();
+                    let response_time = peer_conn.stats.avg_response_time;
+                    let error_score = (1.0 - error_rate).max(0.0);
+                    let response_score = if response_time > 0.0 {
+                        1.0 / (1.0 + response_time)
+                    } else {
+                        1.0
+                    };
+                    let health_score = 0.7 * error_score + 0.3 * response_score;
+                    peer_scores.push((peer, health_score));
+                } else {
+                    peer_scores.push((peer, 0.5));  // Lower score for unhealthy unknowns
+                }
+            }
+        }
+
+        // Sort by score (highest first)
+        peer_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Use weighted random selection from top 50% of peers
+        // This balances between always using the best peer (which might overload it)
+        // and distributing load across healthy peers
+        let top_half = (peer_scores.len() / 2).max(1);
+        let candidates = &peer_scores[..top_half];
+
+        // Simple round-robin among top candidates
+        let mut counter = self.round_robin_counter.write().await;
+        let index = *counter % candidates.len();
+        *counter = (*counter + 1) % candidates.len();
+
+        let selected_peer = candidates[index].0;
+        debug!("Selected peer {} with health score {:.3} (rank {}/{})",
+               selected_peer, candidates[index].1, index + 1, candidates.len());
+
+        Ok(selected_peer)
+    }
+
+    /// Acquire stream with automatic peer selection and failover
+    ///
+    /// This method implements request-level peer failover:
+    /// 1. Selects a healthy peer using weighted round-robin
+    /// 2. Attempts to acquire a stream from that peer
+    /// 3. On failure, retries with a different peer (up to max_retries times)
+    /// 4. Tracks which peers have been tried to avoid retry loops
+    pub async fn acquire_stream_auto(&self) -> Result<(Stream, Option<SemaphorePermit<'static>>)> {
+        let max_retries = self.config.max_retries as usize;
+        let mut tried_peers = std::collections::HashSet::new();
+        let mut last_error = None;
+
+        for attempt in 0..=max_retries {
+            // Select a peer we haven't tried yet
+            let peer = match self.select_peer_round_robin().await {
+                Ok(p) if !tried_peers.contains(&p) => p,
+                Ok(p) => {
+                    // Already tried this peer, try to find another one
+                    debug!("Peer {} already tried, selecting another peer", p);
+                    // Continue to next iteration to get a different peer
+                    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                    continue;
+                }
+                Err(e) => {
+                    last_error = Some(e);
+                    break;
+                }
+            };
+
+            tried_peers.insert(peer);
+
+            match self.acquire_stream(peer).await {
+                Ok((stream, permit)) => {
+                    if attempt > 0 {
+                        debug!("Successfully acquired stream from peer {} after {} retries", peer, attempt);
+                        counter!("p2proxy_failover_success_total").increment(1);
+                    }
+                    return Ok((stream, permit));
+                }
+                Err(e) => {
+                    warn!("Failed to acquire stream from peer {} (attempt {}/{}): {}",
+                          peer, attempt + 1, max_retries + 1, e);
+                    counter!("p2proxy_failover_attempt_total").increment(1);
+                    last_error = Some(e);
+
+                    // Don't retry if we've exhausted all attempts
+                    if attempt >= max_retries {
+                        break;
+                    }
+
+                    // Small delay before retry to avoid hammering
+                    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                }
+            }
+        }
+
+        counter!("p2proxy_failover_exhausted_total").increment(1);
+        Err(last_error.unwrap_or_else(|| eyre!("No peers available for failover")))
     }
 
     /// Open a stream to the given peer with rate limiting and timeout
@@ -305,14 +478,14 @@ impl StreamPool {
         // Mark guard as successful (prevents auto-decrement on drop)
         guard.mark_success();
 
-        // Record success
-        self.record_success(peer).await;
-
+        // Record success with duration for response time tracking
         let duration = start.elapsed();
+        self.record_success_with_duration(peer, Some(duration)).await;
+
         histogram!("p2proxy_stream_acquire_duration_seconds").record(duration.as_secs_f64());
         counter!("p2proxy_stream_opened_total").increment(1);
         counter!("p2proxy_stream_pool_acquire_total").increment(1);
-        debug!("Opened stream in {:?}", duration);
+        debug!("Opened stream to peer {} in {:?}", peer, duration);
 
         // Convert permit to 'static lifetime
         // SAFETY: This is safe because:
@@ -328,11 +501,31 @@ impl StreamPool {
 
     /// Record successful stream opening
     async fn record_success(&self, peer: PeerId) {
+        self.record_success_with_duration(peer, None).await;
+    }
+
+    /// Record successful stream opening with response time
+    async fn record_success_with_duration(&self, peer: PeerId, duration: Option<Duration>) {
         let mut peers = self.peers.write().await;
         if let Some(peer_conn) = peers.get_mut(&peer) {
             peer_conn.stats.total_opened += 1;
             peer_conn.stats.recent_successes += 1;
             peer_conn.reset_recent_stats();
+
+            // Update exponential moving average of response time
+            if let Some(d) = duration {
+                let duration_secs = d.as_secs_f64();
+                const ALPHA: f64 = 0.2; // Weight for new samples (0-1, higher = more reactive)
+                if peer_conn.stats.response_time_samples == 0 {
+                    peer_conn.stats.avg_response_time = duration_secs;
+                } else {
+                    peer_conn.stats.avg_response_time =
+                        ALPHA * duration_secs + (1.0 - ALPHA) * peer_conn.stats.avg_response_time;
+                }
+                peer_conn.stats.response_time_samples += 1;
+                gauge!("p2proxy_peer_avg_response_time", "peer" => peer.to_string())
+                    .set(peer_conn.stats.avg_response_time);
+            }
 
             // Update health status based on error rate
             let error_rate = peer_conn.error_rate();

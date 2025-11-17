@@ -13,9 +13,11 @@ servers:
     pool:
       enabled: true
       min_idle: 5
-      max_total: 30           # Increased from 20 to match Firefox defaults
+      max_total: 200          # Increased for Playwright parallel tests (was 30)
       idle_timeout_secs: 60
-      open_timeout_secs: 20   # Doubled from 10 for P2P network latency
-      max_retries: 3          # New: Number of retries for failed requests
-      health_check_timeout_secs: 5  # New: Timeout for peer health checks
-      max_error_rate: 0.15    # New: Failover threshold (15% error rate)    
+      open_timeout_secs: 30   # Increased for slow P2P connections
+      max_retries: 3          # Number of retries for failed requests
+      health_check_timeout_secs: 5  # Timeout for peer health checks
+      max_error_rate: 0.15    # Failover threshold (15% error rate)
+      max_peers: 12           # Maximum number of peers for load balancing
+      peer_connection_timeout_secs: 20  # Timeout for peer connection establishment    
