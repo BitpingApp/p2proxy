@@ -1,0 +1,17 @@
+/target
+
+# Goreleaser snapshot output
+dist/
+
+# Generated at runtime on first start — each node should have its own
+# unique keypair. Never commit one to the repo.
+node_keypair.bin
+
+# Local test run output
+/test-results/
+playwright-report/
+
+# Editor / OS noise
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+
+# Test outputs
+test-results/
+playwright-report/
+playwright/.cache/
+
+# Playwright browsers
+.cache/
+
+# Test artifacts
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

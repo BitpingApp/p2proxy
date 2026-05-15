@@ -1,0 +1,12 @@
+target/
+.git/
+.github/
+*.log
+node_keypair.bin
+README.md
+CHANGELOG.md
+LICENSE
+.gitignore
+.lapce/
+Dockerfile
+.dockerignore 
