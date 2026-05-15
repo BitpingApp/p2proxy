@@ -1,0 +1,37 @@
+# p2proxy configuration. Copy / edit / mount this file into the daemon.
+# See README.md for the full reference; the values below are a working
+# minimal example that exposes a single SOCKS5 endpoint on :1080 routed
+# through any peer with >= 50 Mbps available bandwidth.
+
+# UDP port the libp2p stack listens on. Does NOT need to be port-forwarded
+# for the proxy to work, but forwarding it improves peer connectivity and
+# reduces relay reliance.
+port: 45445
+
+# Logging verbosity: trace | debug | info | warn | error
+log_level: info
+
+# One or more proxy endpoints. Each entry opens a local listener and
+# routes traffic through peers matching the filter.
+servers:
+  - protocol: Socks5
+    port: 1080
+    # Minimum advertised bandwidth a peer must have to be selected.
+    # Lower values = more peer options but potentially slower throughput.
+    min_bandwidth: 50Mbps
+
+    # Optional: pin to a country (ISO-3166 alpha-2). Omit for any country.
+    # country: US
+
+    # Optional: connection pool tuning. The pool keeps a warm set of P2P
+    # streams open so SOCKS5 handshakes don't pay the libp2p dial cost.
+    # All fields below have sensible defaults; uncomment to override.
+    #
+    # pool:
+    #   enabled: true
+    #   min_idle: 5            # always keep this many warm streams
+    #   max_total: 30          # hard ceiling on concurrent streams
+    #   idle_timeout_secs: 60  # drop streams idle longer than this
+    #   open_timeout_secs: 20  # give up dialing after this long
+    #   max_retries: 3         # retries for a failed request
+    #   max_error_rate: 0.15   # rotate peer if error rate exceeds 15%
