@@ -92,10 +92,12 @@ Requires a recent stable Rust toolchain (`rustup install stable`).
    You'll see the TUI come up showing peer connections. Once it picks a peer (usually within a second or two), point your client at `socks5://localhost:1080`:
 
    ```sh
-   curl --socks5 localhost:1080 https://ifconfig.me
+   curl --socks5-hostname localhost:1080 https://ifconfig.me
    ```
 
    The IP you get back should be the peer's, not yours.
+
+   > **Use `--socks5-hostname`, not `--socks5`.** The plain `--socks5` flag tells curl to resolve the destination locally and hand the proxy a raw IP. That IP usually points at a CDN edge close to *you*, which often doesn't route well from the peer's side, and TLS handshakes fail with `SSL_ERROR_SYSCALL`. `--socks5-hostname` (aka SOCKS5h) lets the peer do the DNS, so it gets a CDN edge close to *it*. Same applies to other clients: use `socks5h://` URLs in Python requests / Playwright proxy config / etc.
 
 ## Configuration
 
