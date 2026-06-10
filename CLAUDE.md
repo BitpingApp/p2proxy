@@ -111,11 +111,12 @@ docker run -p 1080:1080 -p 45445:45445/udp p2proxy
 ### P2P Networking (`p2proxy/src/swarm.rs`)
 
 The core P2P functionality is built on libp2p with the following behaviors:
-- **libp2p-stream**: Stream multiplexing for SOCKS5 connections
+- **libp2p-stream**: Stream multiplexing for SOCKS5 connections, plus the typed
+  request/notify protocols (FindNodes queries, bandwidth reports) that ride a
+  `LibP2pClient` over the stream `Control`
 - **dcutr**: Direct connection upgrade through relay
 - **relay client**: Connection relay when direct connection is not possible
 - **identify**: Peer identification protocol
-- **request-response**: For bandwidth reporting and peer queries
 
 The swarm authenticates with the Bitping gRPC service (`grpc.bitping.com`) before establishing P2P connections.
 

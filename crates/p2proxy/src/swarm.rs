@@ -8,24 +8,23 @@ use crate::utils::wait_ext::SwarmWaitExt;
 use crate::CONFIG;
 use crate::{proxy_protocols, GRPC_CHANNEL};
 use bitping_swarm::auth::Auth;
-use bitping_swarm::query::{QueryCodec, QueryProtocol, QueryRequest};
-use p2p_bandwidth_protocol::bandwidth_reporter::{BandwidthReporterCodec, BandwidthReporterProtocol};
+use bitping_swarm::query::QueryRequest;
 use color_eyre::eyre::{bail, eyre, Context, Result};
 use color_eyre::owo_colors::OwoColorize;
 use futures::StreamExt;
-use libp2p::request_response::Message;
 use libp2p::Multiaddr;
 use libp2p::{
     dcutr, identify,
     identity::{Keypair, PublicKey},
     multiaddr::{self, Protocol},
     noise, ping, relay,
-    request_response::{self, ProtocolSupport},
     swarm::{NetworkBehaviour, SwarmEvent},
     tcp, yamux, PeerId, Swarm,
 };
 use libp2p_stream as stream;
 use metrics::{counter, gauge};
+use p2p_bandwidth_protocol::bandwidth_reporter::AuthedBandwidthReport;
+use p2p_protocol::{client::LibP2pClient, P2pClient};
 use models::config::Server;
 use models::events::Events;
 use models::{Counter, ServerContainer, ServerState};
@@ -53,8 +52,6 @@ struct Behaviour {
     /// ~30 s of failure — fed into our normal `ConnectionClosed →
     /// PeerDisconnected → rediscovery` flow.
     ping: ping::Behaviour,
-    bandwidth_reporter: request_response::Behaviour<BandwidthReporterCodec>,
-    query: request_response::Behaviour<QueryCodec>,
 }
 
 impl Behaviour {
@@ -71,14 +68,6 @@ impl Behaviour {
                 ping::Config::new()
                     .with_interval(Duration::from_secs(15))
                     .with_timeout(Duration::from_secs(10)),
-            ),
-            bandwidth_reporter: request_response::Behaviour::new(
-                [(BandwidthReporterProtocol, ProtocolSupport::Outbound)],
-                request_response::Config::default().with_max_concurrent_streams(1000),
-            ),
-            query: request_response::Behaviour::new(
-                [(QueryProtocol, ProtocolSupport::Outbound)],
-                request_response::Config::default().with_max_concurrent_streams(1000),
             ),
         }
     }
@@ -146,6 +135,10 @@ pub struct Bootstrapped {
 
     // Stream pool for connection reuse
     stream_pool: Arc<StreamPool>,
+
+    /// Typed outbound handle over the swarm's `libp2p_stream::Control` —
+    /// FindNodes asks and bandwidth-report notifies to the hub ride this.
+    client: LibP2pClient,
 
     // Bootstrap connection management
     bootstrap_address: Multiaddr,
@@ -459,6 +452,11 @@ impl ProxyNetwork<NetworkConnect> {
         let stream_control = swarm.behaviour().stream.new_control();
         let stream_pool = StreamPool::new(stream_control, pool_config);
 
+        let client = LibP2pClient::new(
+            swarm.behaviour().stream.new_control(),
+            *swarm.local_peer_id(),
+        );
+
         Ok(ProxyNetwork(Bootstrapped {
             swarm,
             token: self.0.token,
@@ -467,6 +465,7 @@ impl ProxyNetwork<NetworkConnect> {
             relay_peer_id,
             proxy_message_channel: mpsc::channel(1000),
             stream_pool,
+            client,
             bootstrap_address: bootstrap,
             bootstrap_peer_id: Some(bootstrap_peer_id),
             bootstrap_connected: true,
@@ -790,46 +789,38 @@ impl ProxyNetwork<Bootstrapped> {
                 self.0.token.clone(),
             )?;
 
-            let outbound_request_id = self
-                .0
-                .swarm
-                .behaviour_mut()
-                .query
-                .send_request(&self.0.relay_peer_id, request);
-
-            let peer_ids = self
-                .0
-                .swarm
-                .wait_for_with_timeout(
-                    move |swarm, event| match event {
-                        SwarmEvent::Behaviour(BehaviourEvent::Query(
-                            request_response::Event::Message {
-                                peer,
-                                connection_id,
-                                message:
-                                    Message::Response {
-                                        request_id,
-                                        response,
-                                    },
-                            },
-                        )) if *request_id == outbound_request_id => match response {
-                            bitping_swarm::query::QueryResponse::Error(e) => {
-                                Some(Err(eyre!(e.clone())))
-                            }
-                            bitping_swarm::query::QueryResponse::FindNode(peer_id) => {
-                                Some(Err(eyre!(
-                                    "Got wrong query response, expected FindNodes, got: FindNode"
-                                )))
-                            }
-                            bitping_swarm::query::QueryResponse::FindNodes(hash_set) => {
-                                Some(Ok(hash_set.clone()))
-                            }
-                        },
-                        _ => None,
-                    },
-                    Duration::from_secs(5),
-                )
-                .await??;
+            // The ask runs on its own task while we keep polling the swarm —
+            // the `Control`'s open_stream only progresses while the swarm is
+            // driven, and this function holds it exclusively.
+            let client = self.0.client.clone();
+            let relay_peer = self.0.relay_peer_id;
+            let mut ask = tokio::spawn(async move {
+                client
+                    .ask_with_timeout::<Auth<QueryRequest>>(
+                        relay_peer,
+                        request,
+                        Duration::from_secs(5),
+                    )
+                    .await
+            });
+            let ask_result = loop {
+                tokio::select! {
+                    joined = &mut ask => break joined,
+                    _ = self.0.swarm.next() => {}
+                }
+            };
+            let response = ask_result
+                .map_err(|e| eyre!("FindNodes ask task panicked: {e}"))?
+                .map_err(|e| eyre!("FindNodes query failed: {e}"))?;
+            let peer_ids = match response {
+                bitping_swarm::query::QueryResponse::Error(e) => return Err(eyre!(e)),
+                bitping_swarm::query::QueryResponse::FindNode(_) => {
+                    return Err(eyre!(
+                        "Got wrong query response, expected FindNodes, got: FindNode"
+                    ))
+                }
+                bitping_swarm::query::QueryResponse::FindNodes(hash_set) => hash_set,
+            };
 
             // Hub answered the FindNodes query; the *count* tells you whether
             // any operators currently match your country / min_bandwidth
@@ -1108,13 +1099,23 @@ impl ProxyNetwork<Bootstrapped> {
 
                 let token = self.0.token.clone();
                 if let Ok(authed_report) = Auth::new(report, &KEYPAIR, token) {
-                    let authed_report = authed_report.clone();
                     counter!("p2proxy_bandwidth_reports_sent_total").increment(1);
-                    self.0
-                        .swarm
-                        .behaviour_mut()
-                        .bandwidth_reporter
-                        .send_request(&self.0.relay_peer_id, authed_report);
+                    // Fire-and-forget notify, spawned so the proxy-event
+                    // handler returns immediately; the stream opens once the
+                    // main loop resumes polling the swarm.
+                    let client = self.0.client.clone();
+                    let relay_peer = self.0.relay_peer_id;
+                    tokio::spawn(async move {
+                        if let Err(e) = client
+                            .notify::<AuthedBandwidthReport>(
+                                relay_peer,
+                                AuthedBandwidthReport(authed_report),
+                            )
+                            .await
+                        {
+                            warn!(?e, "bandwidth report notify failed");
+                        }
+                    });
                 }
             }
             SocksStreamMessage::RequestNewPeer {

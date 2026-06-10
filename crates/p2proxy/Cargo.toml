@@ -56,6 +56,7 @@ socks5-impl.workspace = true
 # Local path deps that were previously git deps from separate repos
 bitping-swarm.workspace = true
 p2p-bandwidth-protocol.workspace = true
+p2p-protocol.workspace = true
 protocols.workspace = true
 authenticator-service.workspace = true
 models = { path = "../models", package = "p2proxy-models" }
