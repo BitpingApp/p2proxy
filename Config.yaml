@@ -8,6 +8,8 @@
 # reduces relay reliance.
 port: 45445
 
+bootstrap: "/ip4/127.0.0.1/tcp/31515"
+
 # Logging verbosity: trace | debug | info | warn | error
 log_level: info
 
@@ -18,10 +20,10 @@ servers:
     port: 1080
     # Minimum advertised bandwidth a peer must have to be selected.
     # Lower values = more peer options but potentially slower throughput.
-    min_bandwidth: 50Mbps
+    min_bandwidth: 1kbps
 
     # Optional: pin to a country (ISO-3166 alpha-2). Omit for any country.
-    # country: US
+    # country: NL
 
     # Optional: connection pool tuning. The pool keeps a warm set of P2P
     # streams open so SOCKS5 handshakes don't pay the libp2p dial cost.
