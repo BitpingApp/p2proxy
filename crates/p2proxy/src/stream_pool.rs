@@ -88,7 +88,6 @@ pub struct PoolConfig {
     /// Maximum number of retry attempts
     pub max_retries: u32,
     /// Timeout for peer health checks
-    pub health_check_timeout: Duration,
     /// Maximum error rate before triggering failover (0.0-1.0)
     pub max_error_rate: f64,
 }
@@ -100,7 +99,6 @@ impl Default for PoolConfig {
             stream_open_timeout: Duration::from_secs(20),
             enabled: true,
             max_retries: 3,
-            health_check_timeout: Duration::from_secs(5),
             max_error_rate: 0.15,
         }
     }
@@ -113,7 +111,6 @@ impl From<&models::config::PoolConfigOptions> for PoolConfig {
             stream_open_timeout: Duration::from_secs(opts.open_timeout_secs),
             enabled: opts.enabled,
             max_retries: opts.max_retries,
-            health_check_timeout: Duration::from_secs(opts.health_check_timeout_secs),
             max_error_rate: opts.max_error_rate,
         }
     }
@@ -128,8 +125,6 @@ struct PeerStats {
     /// Error rate calculation window (last N attempts)
     recent_successes: u64,
     recent_failures: u64,
-    /// Timestamp of last health check
-    last_health_check: Option<Instant>,
     /// Whether peer is currently healthy
     is_healthy: bool,
 }

@@ -95,7 +95,6 @@ pub fn test_server(port: u16, protocol: ProxyProtocols) -> Server {
         protocol,
         port,
         peer_options: ServerPeerOptions {
-            destination_peer: None,
             destination_peers: None,
             fallback_to_discovery: false,
             sticky: true,
@@ -128,7 +127,6 @@ pub fn test_server_with_country(port: u16, protocol: ProxyProtocols, country: &s
         protocol,
         port,
         peer_options: ServerPeerOptions {
-            destination_peer: None,
             destination_peers: None,
             fallback_to_discovery: false,
             sticky: true,
@@ -160,7 +158,6 @@ pub fn test_server_with_bandwidth(port: u16, protocol: ProxyProtocols, min_bandw
         protocol,
         port,
         peer_options: ServerPeerOptions {
-            destination_peer: None,
             destination_peers: None,
             fallback_to_discovery: false,
             sticky: true,
@@ -322,7 +319,7 @@ mod tests {
 
         assert_eq!(server.port, 1080);
         assert_eq!(server.protocol, ProxyProtocols::Socks5);
-        assert_eq!(server.peer_options.destination_peer, None);
+        assert_eq!(server.peer_options.destination_peers, None);
         assert_eq!(server.peer_options.country, None);
     }
 

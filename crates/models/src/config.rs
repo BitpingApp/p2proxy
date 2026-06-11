@@ -66,10 +66,6 @@ pub struct PoolConfigOptions {
     #[serde(default = "default_max_retries")]
     pub max_retries: u32,
 
-    /// Timeout for peer health checks in seconds
-    #[serde(default = "default_health_check_timeout_secs")]
-    pub health_check_timeout_secs: u64,
-
     /// Maximum error rate before triggering failover (0.0-1.0)
     #[serde(default = "default_max_error_rate")]
     pub max_error_rate: f64,
@@ -85,7 +81,6 @@ impl std::hash::Hash for PoolConfigOptions {
         self.idle_timeout_secs.hash(state);
         self.open_timeout_secs.hash(state);
         self.max_retries.hash(state);
-        self.health_check_timeout_secs.hash(state);
         self.max_error_rate.to_bits().hash(state); // Convert f64 to u64 for hashing
     }
 }
@@ -98,7 +93,6 @@ impl PartialEq for PoolConfigOptions {
             && self.idle_timeout_secs == other.idle_timeout_secs
             && self.open_timeout_secs == other.open_timeout_secs
             && self.max_retries == other.max_retries
-            && self.health_check_timeout_secs == other.health_check_timeout_secs
             && self.max_error_rate.to_bits() == other.max_error_rate.to_bits()
     }
 }
@@ -120,7 +114,6 @@ impl Ord for PoolConfigOptions {
             .then_with(|| self.idle_timeout_secs.cmp(&other.idle_timeout_secs))
             .then_with(|| self.open_timeout_secs.cmp(&other.open_timeout_secs))
             .then_with(|| self.max_retries.cmp(&other.max_retries))
-            .then_with(|| self.health_check_timeout_secs.cmp(&other.health_check_timeout_secs))
             .then_with(|| self.max_error_rate.to_bits().cmp(&other.max_error_rate.to_bits()))
     }
 }
@@ -134,7 +127,6 @@ impl Default for PoolConfigOptions {
             idle_timeout_secs: default_idle_timeout_secs(),
             open_timeout_secs: default_open_timeout_secs(),
             max_retries: default_max_retries(),
-            health_check_timeout_secs: default_health_check_timeout_secs(),
             max_error_rate: default_max_error_rate(),
         }
     }
@@ -164,10 +156,6 @@ fn default_max_retries() -> u32 {
     3
 }
 
-fn default_health_check_timeout_secs() -> u64 {
-    5
-}
-
 fn default_max_error_rate() -> f64 {
     0.15
 }
@@ -186,9 +174,6 @@ pub struct Server {
 
 #[derive(Serialize, Deserialize, Debug, Hash, Eq, PartialEq, PartialOrd, Ord, Clone)]
 pub struct ServerPeerOptions {
-    /// Deprecated single-peer pin — use `destination_peers` instead. Kept as
-    /// an alias: `pinned()` converts it into a one-element preference list.
-    pub destination_peer: Option<Multiaddr>,
     /// Ordered pinned-peer preference list (BIT-597). Each entry is a bare
     /// peer id (`12D3Koo…`, preferred — the route is resolved through the hub
     /// at connect time) or a full multiaddr ending in `/p2p/<peer-id>`
@@ -231,10 +216,10 @@ pub struct DestinationPeerEntry {
 }
 
 impl DestinationPeerEntry {
-    /// Interpret a legacy `destination_peer` multiaddr: the LAST `/p2p/`
-    /// component is the destination identity (a circuit address carries the
-    /// relay's id earlier in the path). A bare `/p2p/<id>` pins identity
-    /// only; anything longer is also dialable verbatim.
+    /// Interpret a multiaddr entry: the LAST `/p2p/` component is the
+    /// destination identity (a circuit address carries the relay's id
+    /// earlier in the path). A bare `/p2p/<id>` pins identity only;
+    /// anything longer is also dialable verbatim.
     pub fn from_multiaddr(addr: &Multiaddr) -> Option<Self> {
         let peer_id = addr
             .iter()
@@ -307,46 +292,22 @@ impl Serialize for DestinationPeerEntry {
 /// through arbitrary nodes.
 #[derive(Debug, Error)]
 pub enum ConfigValidationError {
-    #[error("server :{port}: set either destination_peer or destination_peers, not both")]
-    BothPinFieldsSet { port: u16 },
     #[error("server :{port}: destination_peers is present but empty — list at least one peer or remove the key")]
     EmptyPinnedList { port: u16 },
-    #[error("server :{port}: destination_peer {addr} has no /p2p/<peer-id> component")]
-    LegacyPinWithoutPeerId { port: u16, addr: Multiaddr },
 }
 
 impl ServerPeerOptions {
-    /// The ordered pinned-peer list, with the deprecated `destination_peer`
-    /// alias folded in as a one-element list. Empty when the server is
+    /// The ordered pinned-peer list. Empty when the server is
     /// discovery-driven.
     pub fn pinned(&self) -> Vec<DestinationPeerEntry> {
-        if let Some(list) = &self.destination_peers {
-            return list.clone();
-        }
-        let Some(legacy) = &self.destination_peer else {
-            return Vec::new();
-        };
-        DestinationPeerEntry::from_multiaddr(legacy)
-            .into_iter()
-            .collect()
+        self.destination_peers.clone().unwrap_or_default()
     }
 
     pub fn validate(&self, port: u16) -> Result<(), ConfigValidationError> {
-        if self.destination_peer.is_some() && self.destination_peers.is_some() {
-            return Err(ConfigValidationError::BothPinFieldsSet { port });
-        }
         if let Some(list) = &self.destination_peers
             && list.is_empty()
         {
             return Err(ConfigValidationError::EmptyPinnedList { port });
-        }
-        if let Some(legacy) = &self.destination_peer
-            && DestinationPeerEntry::from_multiaddr(legacy).is_none()
-        {
-            return Err(ConfigValidationError::LegacyPinWithoutPeerId {
-                port,
-                addr: legacy.clone(),
-            });
         }
         Ok(())
     }
@@ -432,12 +393,8 @@ mod destination_peer_tests {
             .to_peer_id()
     }
 
-    fn options(
-        destination_peer: Option<Multiaddr>,
-        destination_peers: Option<Vec<DestinationPeerEntry>>,
-    ) -> ServerPeerOptions {
+    fn options(destination_peers: Option<Vec<DestinationPeerEntry>>) -> ServerPeerOptions {
         ServerPeerOptions {
-            destination_peer,
             destination_peers,
             fallback_to_discovery: false,
             sticky: true,
@@ -506,21 +463,8 @@ mod destination_peer_tests {
     }
 
     #[test]
-    fn validate_rejects_both_pin_fields() {
-        let id = random_peer();
-        let opts = options(
-            Some(format!("/p2p/{id}").parse().expect("addr")),
-            Some(vec![id.to_string().parse().expect("entry")]),
-        );
-        assert!(matches!(
-            opts.validate(1080),
-            Err(ConfigValidationError::BothPinFieldsSet { port: 1080 })
-        ));
-    }
-
-    #[test]
     fn validate_rejects_empty_pinned_list() {
-        let opts = options(None, Some(vec![]));
+        let opts = options(Some(vec![]));
         assert!(matches!(
             opts.validate(1080),
             Err(ConfigValidationError::EmptyPinnedList { port: 1080 })
@@ -528,33 +472,8 @@ mod destination_peer_tests {
     }
 
     #[test]
-    fn validate_rejects_legacy_pin_without_peer_id() {
-        let opts = options(Some("/ip4/1.2.3.4/tcp/443".parse().expect("addr")), None);
-        assert!(matches!(
-            opts.validate(1080),
-            Err(ConfigValidationError::LegacyPinWithoutPeerId { port: 1080, .. })
-        ));
-    }
-
-    #[test]
-    fn pinned_folds_legacy_alias_into_list() {
-        let id = random_peer();
-        let opts = options(Some(format!("/p2p/{id}").parse().expect("addr")), None);
-        let pinned = opts.pinned();
-        assert_eq!(pinned.len(), 1);
-        assert_eq!(pinned[0].peer_id, id);
-        assert_eq!(pinned[0].address, None);
-
-        let full: Multiaddr = format!("/ip4/9.9.9.9/tcp/31515/p2p/{id}")
-            .parse()
-            .expect("addr");
-        let opts = options(Some(full.clone()), None);
-        assert_eq!(opts.pinned()[0].address, Some(full));
-    }
-
-    #[test]
     fn pinned_empty_for_discovery_servers() {
-        assert!(options(None, None).pinned().is_empty());
+        assert!(options(None).pinned().is_empty());
     }
 
     #[test]
@@ -586,19 +505,19 @@ mod destination_peer_tests {
 
     #[test]
     fn fingerprint_changes_on_each_filter_dimension() {
-        let base = options(None, None);
+        let base = options(None);
         let fp = base.filter_fingerprint(1080);
         assert_ne!(fp, base.filter_fingerprint(1081), "port changes fp");
 
-        let mut with_country = options(None, None);
+        let mut with_country = options(None);
         with_country.country = Some("NL".to_string());
         assert_ne!(fp, with_country.filter_fingerprint(1080));
 
-        let mut with_bw = options(None, None);
+        let mut with_bw = options(None);
         with_bw.min_bandwidth = Bandwidth::from_mbps(100);
         assert_ne!(fp, with_bw.filter_fingerprint(1080));
 
-        assert_eq!(fp, options(None, None).filter_fingerprint(1080), "stable");
+        assert_eq!(fp, options(None).filter_fingerprint(1080), "stable");
     }
 }
 
@@ -669,12 +588,6 @@ impl Config {
             .extract()?;
         for server in &config.servers {
             server.peer_options.validate(server.port)?;
-            if server.peer_options.destination_peer.is_some() {
-                tracing::warn!(
-                    port = server.port,
-                    "destination_peer is deprecated — use destination_peers (ordered list)"
-                );
-            }
         }
         Ok(config)
     }

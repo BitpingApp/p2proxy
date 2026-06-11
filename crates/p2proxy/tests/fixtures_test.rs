@@ -22,7 +22,7 @@ mod tests {
 
         assert_eq!(server.port, 1080);
         assert_eq!(server.protocol, ProxyProtocols::Socks5);
-        assert_eq!(server.peer_options.destination_peer, None);
+        assert_eq!(server.peer_options.destination_peers, None);
         assert_eq!(server.peer_options.country, None);
     }
 

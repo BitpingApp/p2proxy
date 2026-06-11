@@ -123,7 +123,6 @@ Requires a recent stable Rust toolchain (`rustup install stable`).
 | `destination_peers` | list | — | Ordered pinned-peer preference list for stable egress IPs. Each entry is a bare peer id (preferred) or a full multiaddr ending in `/p2p/<peer-id>`. See [Pinning & sticky peers](#pinning--sticky-peers). |
 | `fallback_to_discovery` | bool | `false` | When every pinned peer is offline: `false` keeps retrying the list (hard pin); `true` falls back to country/bandwidth discovery. |
 | `sticky` | bool | `true` | Remember the discovered exit peer and reconnect to it across restarts for a stable egress IP. Ignored when `destination_peers` is set. |
-| `destination_peer` | string | — | **Deprecated** — use `destination_peers`. A single pinned multiaddr; treated as a one-entry preference list. |
 | `pool` | object | — | Optional connection-pool tuning (below). |
 
 ### Pinning & sticky peers
@@ -173,8 +172,10 @@ working directories (each owns its own `sticky_peers.json`, same as
 `node_keypair.bin` — instances sharing a CWD would already share identity and
 would overwrite each other's sticky state).
 
-> **Changed behavior:** restarts no longer rotate your exit IP by default. Set
-> `sticky: false` to restore the old pick-a-fresh-peer-per-restart behavior.
+> **Changed behavior:** restarts no longer rotate your exit IP by default — set
+> `sticky: false` to restore the old pick-a-fresh-peer-per-restart behavior. The
+> old `destination_peer` setting was **removed**: rename it to
+> `destination_peers` and make the value a one-element list.
 
 ### Per-server connection pool
 

@@ -205,13 +205,6 @@ pub struct Bootstrapped {
 ///   "lazy" remains the safety net.
 const REDISCOVERY_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(30);
 
-pub struct ProxyForwarding {
-    token: String,
-    swarm: Swarm<Behaviour>,
-    event_send: Sender<Events>,
-    destination_peer: PeerId,
-}
-
 impl ProxyNetwork<AuthStep> {
     pub async fn with_authentication() -> Result<ProxyNetwork<NetworkConnect>> {
         let mut auth_client = AuthenticationServiceClient::new(GRPC_CHANNEL.clone())
