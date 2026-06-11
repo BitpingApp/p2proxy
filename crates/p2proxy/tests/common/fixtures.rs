@@ -96,6 +96,9 @@ pub fn test_server(port: u16, protocol: ProxyProtocols) -> Server {
         port,
         peer_options: ServerPeerOptions {
             destination_peer: None,
+            destination_peers: None,
+            fallback_to_discovery: false,
+            sticky: true,
             country: None,
             min_bandwidth: Bandwidth::from_mbps(50),
         },
@@ -126,6 +129,9 @@ pub fn test_server_with_country(port: u16, protocol: ProxyProtocols, country: &s
         port,
         peer_options: ServerPeerOptions {
             destination_peer: None,
+            destination_peers: None,
+            fallback_to_discovery: false,
+            sticky: true,
             country: Some(country.to_string()),
             min_bandwidth: Bandwidth::from_mbps(50),
         },
@@ -155,6 +161,9 @@ pub fn test_server_with_bandwidth(port: u16, protocol: ProxyProtocols, min_bandw
         port,
         peer_options: ServerPeerOptions {
             destination_peer: None,
+            destination_peers: None,
+            fallback_to_discovery: false,
+            sticky: true,
             country: None,
             min_bandwidth: Bandwidth::from_mbps(min_bandwidth_mbps),
         },
