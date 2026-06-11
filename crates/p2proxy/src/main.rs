@@ -13,6 +13,7 @@ use tracing::level_filters::LevelFilter;
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
 
+mod discovery;
 mod proxy_protocols;
 mod stream_pool;
 mod swarm;
