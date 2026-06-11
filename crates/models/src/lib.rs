@@ -184,11 +184,14 @@ impl ServerContainer {
             // via the per-task event stream. ServerContainer has no
             // useful state to mutate.
             Events::Error(_) => {}
-            // ServerPool and ActiveDestination are TUI-only — they
-            // surface the FindNodes pool and active destination peer
-            // per server so the NETWORK tab can render them. The
-            // ServerContainer doesn't track this state.
-            Events::ServerPool { .. } | Events::ActiveDestination { .. } => {}
+            // ServerPool, ActiveDestination, and PinnedPeerStatuses are
+            // TUI-only — they surface the FindNodes pool, active
+            // destination, and pinned-list health per server so the
+            // NETWORK tab can render them. The ServerContainer doesn't
+            // track this state.
+            Events::ServerPool { .. }
+            | Events::ActiveDestination { .. }
+            | Events::PinnedPeerStatuses { .. } => {}
         }
     }
 }

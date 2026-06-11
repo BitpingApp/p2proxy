@@ -475,16 +475,28 @@ impl Ui {
                 // out of the table automatically.
                 self.state.server_pools.insert(port, peers);
             }
-            Events::ActiveDestination { port, peer } => {
+            Events::ActiveDestination { port, peer, source } => {
                 match peer {
                     Some(p) => {
                         self.state.peers.insert(p);
                         self.state.active_destinations.insert(port, p);
+                        match source {
+                            Some(s) => {
+                                self.state.destination_sources.insert(port, s);
+                            }
+                            None => {
+                                self.state.destination_sources.remove(&port);
+                            }
+                        }
                     }
                     None => {
                         self.state.active_destinations.remove(&port);
+                        self.state.destination_sources.remove(&port);
                     }
                 }
+            }
+            Events::PinnedPeerStatuses { port, statuses } => {
+                self.state.pinned_statuses.insert(port, statuses);
             }
         };
 

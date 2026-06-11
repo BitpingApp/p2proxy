@@ -8,8 +8,10 @@ mod resolve;
 
 pub(crate) use connect::connect;
 
+use std::collections::HashMap;
+
 use libp2p::{Multiaddr, PeerId, Swarm};
-use models::events::Events;
+use models::events::{DestinationSource, Events};
 use p2p_protocol::client::LibP2pClient;
 use tokio::sync::mpsc::Sender;
 
@@ -32,4 +34,18 @@ pub(crate) struct DiscoveryEngine<'a> {
     /// When `true`, discovery failures bail instead of looping with TUI
     /// error events.
     pub headless: bool,
+    /// Whether the hub answered a `ResolvePeers` query yet (`None` =
+    /// untried). Only gates warn-once logging — resolution is retried
+    /// every pass regardless, so one transient failure never pins the
+    /// process to legacy circuit synthesis.
+    pub resolve_supported: &'a mut Option<bool>,
+    /// Last known per-(port, peer) resolvability, so stale-peer log lines
+    /// fire on transitions instead of every retry pass.
+    pub pinned_resolvable: &'a mut HashMap<(u16, PeerId), bool>,
+}
+
+/// The outcome of [`connect`]: the adopted destination and how it was chosen.
+pub(crate) struct ConnectedDestination {
+    pub peer: PeerId,
+    pub source: DestinationSource,
 }

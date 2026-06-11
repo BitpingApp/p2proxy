@@ -24,13 +24,45 @@ pub enum Events {
         peers: Vec<libp2p::PeerId>,
     },
     /// The active destination peer for a server changed. Fired when a
-    /// fresh `discover_and_connect_to_peer` lands (initial discovery
-    /// or post-disconnect rediscovery). `peer` may be `None` to
-    /// represent "discovery in progress, no peer yet".
+    /// fresh discover-and-connect lands (initial discovery or
+    /// post-disconnect rediscovery). `peer` may be `None` to
+    /// represent "discovery in progress, no peer yet"; `source` says how
+    /// the peer was chosen (pinned rank / sticky reuse / fresh discovery).
     ActiveDestination {
         port: u16,
         peer: Option<libp2p::PeerId>,
+        source: Option<DestinationSource>,
     },
+    /// Per-rank resolvability of a server's pinned preference list
+    /// (BIT-597), refreshed on every pinned connect pass. Lets the
+    /// NETWORK tab flag stale entries ("pinned peer no longer reachable
+    /// anywhere in the mesh") before the operator notices traffic moved
+    /// to a lower-preference peer.
+    PinnedPeerStatuses {
+        port: u16,
+        statuses: Vec<PinnedPeerStatus>,
+    },
+}
+
+/// How a server's active destination was selected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DestinationSource {
+    /// From the `destination_peers` list; `rank` 0 is the most preferred.
+    Pinned { rank: usize },
+    /// Remembered exit peer reused from the sticky store.
+    Sticky,
+    /// Fresh attribute-filtered FindNodes discovery.
+    Discovered,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PinnedPeerStatus {
+    pub peer_id: PeerId,
+    pub rank: usize,
+    /// `true` when the peer currently has a dialable route (hub-resolved or
+    /// verbatim multiaddr); `false` means stale — not connected anywhere in
+    /// the reachable hub mesh.
+    pub resolvable: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

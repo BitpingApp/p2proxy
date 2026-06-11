@@ -1,51 +1,153 @@
 //! Hub-side discovery queries: `FindNodes` (attribute-filtered candidate
-//! discovery) and legacy pinned-multiaddr route synthesis.
+//! discovery), `ResolvePeers` (explicit peer-id → current-route resolution,
+//! BIT-597), and legacy circuit-route synthesis.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use bitping_swarm::auth::Auth;
-use bitping_swarm::query::QueryRequest;
+use bitping_swarm::query::{QueryRequest, QueryResponse, MAX_RESOLVE_PEERS};
 use color_eyre::eyre::{eyre, Result};
 use futures::StreamExt;
-use libp2p::{multiaddr::Protocol, Multiaddr};
+use libp2p::{multiaddr::Protocol, Multiaddr, PeerId};
+use metrics::counter;
 use models::config::Server;
 use models::events::Events;
 use p2p_protocol::P2pClient;
 use protocols::models::v1::{Bandwidth, Exclusions, Requirements};
+use thiserror::Error;
 use tracing::{info, instrument, warn};
 
 use crate::swarm::KEYPAIR;
 
 use super::DiscoveryEngine;
 
-/// Discover dial addresses for a server: the legacy `destination_peer` pin
-/// (verbatim multiaddr, or `<relay>/p2p-circuit/p2p/<id>` synthesis for a
-/// bare `/p2p/<id>`), or a hub `FindNodes` query filtered by the server's
-/// country / min_bandwidth.
+#[derive(Debug, Error)]
+pub(crate) enum ResolveError {
+    /// The hub dropped the stream or answered with an error — the shape an
+    /// old (pre-BIT-597) hub produces on the unknown query variant. The
+    /// caller falls back to circuit synthesis for this pass; the query is
+    /// retried on the next pass, so a transient network failure here never
+    /// permanently downgrades resolution.
+    #[error("hub could not answer ResolvePeers: {0}")]
+    Unsupported(String),
+    #[error("ResolvePeers ask task panicked: {0}")]
+    TaskPanicked(String),
+}
+
+/// Spawn `ask` on its own task while keeping the swarm polled — the
+/// `Control`'s open_stream only progresses while the swarm is driven, and
+/// the discovery path holds it exclusively.
+async fn ask_hub(
+    engine: &mut DiscoveryEngine<'_>,
+    request: Auth<QueryRequest>,
+) -> Result<Result<QueryResponse, p2p_protocol::P2pError>, tokio::task::JoinError> {
+    let client = engine.client.clone();
+    let relay_peer = engine.relay_peer_id;
+    let mut ask = tokio::spawn(async move {
+        client
+            .ask_with_timeout::<Auth<QueryRequest>>(relay_peer, request, Duration::from_secs(5))
+            .await
+    });
+    loop {
+        tokio::select! {
+            joined = &mut ask => break joined,
+            _ = engine.swarm.next() => {}
+        }
+    }
+}
+
+/// The legacy `<relay>/p2p-circuit/p2p/<id>` route through our own bootstrap
+/// hub — only reaches peers homed on that hub. Used when the hub can't
+/// resolve a current route (old hub, or no `public_address` configured).
+pub(crate) fn synthesize_circuit(relay_address: &Multiaddr, peer_id: PeerId) -> Option<Multiaddr> {
+    relay_address
+        .clone()
+        .with(Protocol::P2pCircuit)
+        .with_p2p(peer_id)
+        .ok()
+}
+
+/// Resolve pinned peer ids to their CURRENT routes via the hub's
+/// `ResolvePeers` query (BIT-597). Ids absent from the result are not
+/// connected anywhere in the reachable hub mesh. Runs on every (re)connect
+/// pass so hub re-homing is followed transparently.
+pub(crate) async fn resolve_pinned_routes(
+    engine: &mut DiscoveryEngine<'_>,
+    peer_ids: &[PeerId],
+) -> Result<HashMap<PeerId, Vec<Multiaddr>>, ResolveError> {
+    let capped: Vec<PeerId> = peer_ids.iter().copied().take(MAX_RESOLVE_PEERS).collect();
+    if capped.len() < peer_ids.len() {
+        warn!(
+            requested = peer_ids.len(),
+            cap = MAX_RESOLVE_PEERS,
+            "destination_peers exceeds the hub cap — resolving only the first entries"
+        );
+    }
+
+    counter!("p2proxy_resolve_peers_total").increment(1);
+    let request = Auth::new(
+        QueryRequest::ResolvePeers(capped),
+        &KEYPAIR,
+        engine.token.to_string(),
+    )
+    .map_err(|e| ResolveError::Unsupported(format!("failed to sign request: {e}")))?;
+
+    let response = match ask_hub(engine, request).await {
+        Err(join_err) => return Err(ResolveError::TaskPanicked(join_err.to_string())),
+        Ok(Err(ask_err)) => {
+            note_resolve_unsupported(engine, &ask_err.to_string());
+            return Err(ResolveError::Unsupported(ask_err.to_string()));
+        }
+        Ok(Ok(response)) => response,
+    };
+
+    let discovered = match response {
+        QueryResponse::FindNodes(set) => set,
+        QueryResponse::Error(e) => {
+            note_resolve_unsupported(engine, &e);
+            return Err(ResolveError::Unsupported(e));
+        }
+        QueryResponse::FindNode(_) => {
+            return Err(ResolveError::Unsupported(
+                "expected FindNodes response, got FindNode".to_string(),
+            ))
+        }
+    };
+
+    if engine.resolve_supported.is_none() {
+        info!("hub supports ResolvePeers — pinned routes resolve dynamically");
+    }
+    *engine.resolve_supported = Some(true);
+    Ok(discovered
+        .into_iter()
+        .map(|p| (p.peer_id, p.addresses))
+        .collect())
+}
+
+/// Warn loudly the first time resolution fails (likely a pre-BIT-597 hub);
+/// later failures only count a metric — the caller retries every pass.
+fn note_resolve_unsupported(engine: &mut DiscoveryEngine<'_>, reason: &str) {
+    counter!("p2proxy_resolve_peers_unsupported_total").increment(1);
+    if engine.resolve_supported.is_none() {
+        warn!(
+            reason,
+            "hub did not answer ResolvePeers — falling back to relay-circuit synthesis. \
+             Routes to peers homed on other hubs will be unreachable until the hub is upgraded."
+        );
+        *engine.resolve_supported = Some(false);
+    }
+}
+
+/// Discover dial addresses for a server via a hub `FindNodes` query
+/// filtered by the server's country / min_bandwidth. Pinned servers never
+/// reach this — `connect` routes them through `resolve_pinned_routes`.
 #[instrument(skip(engine))]
 pub(crate) async fn discover_peer(
     engine: &mut DiscoveryEngine<'_>,
     server: &Server,
 ) -> Result<HashSet<Multiaddr>, color_eyre::eyre::Error> {
-    let destination_address = if let Some(destination_peer) =
-        &server.peer_options.destination_peer
-    {
-        if let Some(Protocol::P2p(peer_id)) = destination_peer.iter().next() {
-            info!("Trying to connect to destination peer");
-            // Case 1: It starts with a P2p protocol, append it to the relay address
-            let circuit = engine
-                .relay_address
-                .clone()
-                .with(Protocol::P2pCircuit)
-                .with_p2p(peer_id)
-                .map_err(|addr| eyre!("could not append /p2p/{peer_id} to relay circuit {addr}"))?;
-            HashSet::from_iter(vec![circuit])
-        } else {
-            // Case 2: It's a fully formed multiaddr that doesn't start with P2p, use it directly
-            HashSet::from_iter(vec![destination_peer.clone()])
-        }
-    } else {
+    let destination_address = {
         let mut node_reqs = Requirements::default();
         let node_excs = Exclusions {
             bandwidth: Some(Bandwidth {
@@ -82,37 +184,18 @@ pub(crate) async fn discover_peer(
             engine.token.to_string(),
         )?;
 
-        // The ask runs on its own task while we keep polling the swarm —
-        // the `Control`'s open_stream only progresses while the swarm is
-        // driven, and this function holds it exclusively.
-        let client = engine.client.clone();
-        let relay_peer = engine.relay_peer_id;
-        let mut ask = tokio::spawn(async move {
-            client
-                .ask_with_timeout::<Auth<QueryRequest>>(
-                    relay_peer,
-                    request,
-                    Duration::from_secs(5),
-                )
-                .await
-        });
-        let ask_result = loop {
-            tokio::select! {
-                joined = &mut ask => break joined,
-                _ = engine.swarm.next() => {}
-            }
-        };
-        let response = ask_result
+        let response = ask_hub(engine, request)
+            .await
             .map_err(|e| eyre!("FindNodes ask task panicked: {e}"))?
             .map_err(|e| eyre!("FindNodes query failed: {e}"))?;
         let peer_ids = match response {
-            bitping_swarm::query::QueryResponse::Error(e) => return Err(eyre!(e)),
-            bitping_swarm::query::QueryResponse::FindNode(_) => {
+            QueryResponse::Error(e) => return Err(eyre!(e)),
+            QueryResponse::FindNode(_) => {
                 return Err(eyre!(
                     "Got wrong query response, expected FindNodes, got: FindNode"
                 ))
             }
-            bitping_swarm::query::QueryResponse::FindNodes(hash_set) => hash_set,
+            QueryResponse::FindNodes(hash_set) => hash_set,
         };
 
         // Hub answered the FindNodes query; the *count* tells you whether
@@ -163,13 +246,9 @@ pub(crate) async fn discover_peer(
                 if p.addresses.is_empty() {
                     // Legacy fallback — only reaches peers on the
                     // hub we're connected to.
-                    let synth = engine
-                        .relay_address
-                        .clone()
-                        .with(Protocol::P2pCircuit)
-                        .with_p2p(p.peer_id)
-                        .ok();
-                    synth.into_iter().collect::<Vec<_>>()
+                    synthesize_circuit(engine.relay_address, p.peer_id)
+                        .into_iter()
+                        .collect::<Vec<_>>()
                 } else {
                     p.addresses
                 }

@@ -175,6 +175,14 @@ pub struct Bootstrapped {
     /// clear the ArcSwap. Killed the rediscovery storm in the
     /// post-fix world (was 148 cycles/12h, expect <10 with this).
     last_rediscovery: std::collections::HashMap<u16, std::time::Instant>,
+
+    /// Whether the hub has answered a `ResolvePeers` query yet (BIT-597).
+    /// Gates the warn-once "hub doesn't support resolution" log.
+    resolve_supported: Option<bool>,
+
+    /// Last known per-(port, pinned-peer) resolvability — stale-peer log
+    /// lines fire on transitions, not every retry pass.
+    pinned_resolvable: std::collections::HashMap<(u16, PeerId), bool>,
 }
 
 /// Minimum wall-clock gap between successive eager re-discoveries for
@@ -470,6 +478,8 @@ impl ProxyNetwork<NetworkConnect> {
             headless,
             destination_peers: std::collections::HashMap::new(),
             last_rediscovery: std::collections::HashMap::new(),
+            resolve_supported: None,
+            pinned_resolvable: std::collections::HashMap::new(),
         }))
     }
 }
@@ -537,6 +547,8 @@ impl ProxyNetwork<Bootstrapped> {
             token: &self.0.token,
             event_send: &self.0.event_send,
             headless: self.0.headless,
+            resolve_supported: &mut self.0.resolve_supported,
+            pinned_resolvable: &mut self.0.pinned_resolvable,
         }
     }
 
@@ -783,12 +795,12 @@ impl ProxyNetwork<Bootstrapped> {
                 // the requesting session via the oneshot.
                 counter!("p2proxy_peer_requests_total").increment(1);
                 match crate::discovery::connect(self.discovery_engine(), server_config, shutdown).await {
-                    Ok(p) => {
+                    Ok(destination) => {
                         counter!("p2proxy_peer_discoveries_successful_total").increment(1);
                         if let Some(handle) =
                             self.0.destination_peers.get(&server_config.port).cloned()
                         {
-                            handle.store(Arc::new(Some(p)));
+                            handle.store(Arc::new(Some(destination.peer)));
                         }
                         metrics::gauge!(
                             "p2proxy_server_active_destination_present",
@@ -800,11 +812,12 @@ impl ProxyNetwork<Bootstrapped> {
                             .event_send
                             .send(Events::ActiveDestination {
                                 port: server_config.port,
-                                peer: Some(p),
+                                peer: Some(destination.peer),
+                                source: Some(destination.source),
                             })
                             .await;
                         let _ = callback
-                            .send(p)
+                            .send(destination.peer)
                             .map_err(|p| eyre!("Failed to send new peer back to stream {p}"))?;
                     }
                     e => {
@@ -879,6 +892,7 @@ impl ProxyNetwork<Bootstrapped> {
                         .send(Events::ActiveDestination {
                             port: server_config.port,
                             peer: None,
+                            source: None,
                         })
                         .await;
                     return Ok(());
@@ -906,9 +920,9 @@ impl ProxyNetwork<Bootstrapped> {
                 match crate::discovery::connect(self.discovery_engine(), server_config, shutdown)
                     .await
                 {
-                    Ok(new_peer) => {
-                        info!(?old_peer, ?new_peer, port = server_config.port, "warm-rediscovered destination peer");
-                        handle.store(Arc::new(Some(new_peer)));
+                    Ok(destination) => {
+                        info!(?old_peer, new_peer = ?destination.peer, port = server_config.port, "warm-rediscovered destination peer");
+                        handle.store(Arc::new(Some(destination.peer)));
                         metrics::gauge!(
                             "p2proxy_server_active_destination_present",
                             "port" => server_config.port.to_string()
@@ -919,7 +933,8 @@ impl ProxyNetwork<Bootstrapped> {
                             .event_send
                             .send(Events::ActiveDestination {
                                 port: server_config.port,
-                                peer: Some(new_peer),
+                                peer: Some(destination.peer),
+                                source: Some(destination.source),
                             })
                             .await;
                     }
@@ -944,6 +959,7 @@ impl ProxyNetwork<Bootstrapped> {
                             .send(Events::ActiveDestination {
                                 port: server_config.port,
                                 peer: None,
+                                source: None,
                             })
                             .await;
                     }
@@ -960,9 +976,9 @@ impl ProxyNetwork<Bootstrapped> {
                 };
                 info!(port = server_config.port, "running initial peer discovery");
                 match crate::discovery::connect(self.discovery_engine(), server_config, shutdown).await {
-                    Ok(peer) => {
-                        info!(?peer, port = server_config.port, "destination peer discovered");
-                        handle.store(Arc::new(Some(peer)));
+                    Ok(destination) => {
+                        info!(peer = ?destination.peer, port = server_config.port, "destination peer discovered");
+                        handle.store(Arc::new(Some(destination.peer)));
                         metrics::gauge!(
                             "p2proxy_server_active_destination_present",
                             "port" => server_config.port.to_string()
@@ -973,7 +989,8 @@ impl ProxyNetwork<Bootstrapped> {
                             .event_send
                             .send(Events::ActiveDestination {
                                 port: server_config.port,
-                                peer: Some(peer),
+                                peer: Some(destination.peer),
+                                source: Some(destination.source),
                             })
                             .await;
                     }

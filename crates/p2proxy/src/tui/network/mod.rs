@@ -77,9 +77,19 @@ impl Ui {
         server: &'static models::config::Server,
         is_selected: bool,
     ) {
+        // Pinned servers render one status row per rank inside the header,
+        // so it grows with the preference list; discovery servers keep the
+        // fixed 5-row header.
+        let pinned_rows = self
+            .state
+            .pinned_statuses
+            .get(&server.port)
+            .map(|s| s.len() as u16)
+            .unwrap_or(0);
+        let header_height = if pinned_rows > 0 { 5 + pinned_rows } else { 5 };
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(5), Constraint::Min(0)])
+            .constraints([Constraint::Length(header_height), Constraint::Min(0)])
             .split(area);
 
         self.render_server_header(frame, chunks[0], server, is_selected);
@@ -186,8 +196,15 @@ impl Ui {
             format!("{bps}bps")
         };
         filter_parts.push(format!("min bw: {bw_str}"));
-        if let Some(ref dest) = server.peer_options.destination_peer {
-            filter_parts.push(format!("dest: {dest}"));
+        let pinned = server.peer_options.pinned();
+        if !pinned.is_empty() {
+            filter_parts.push(format!(
+                "pinned: {} peer{}",
+                pinned.len(),
+                if pinned.len() == 1 { "" } else { "s" }
+            ));
+        } else if server.peer_options.sticky {
+            filter_parts.push("sticky".to_string());
         }
         let filter_text = if filter_parts.is_empty() {
             "no filters".to_string()
@@ -197,7 +214,8 @@ impl Ui {
 
         // Active-destination summary: PeerId truncated to 12 chars
         // (enough to recognise + uniquely identify in practice), plus
-        // total bytes attributed to that peer so far.
+        // total bytes attributed to that peer so far and how it was
+        // selected (pinned rank / sticky / discovered).
         let active_line = match self.state.active_destinations.get(&server.port) {
             Some(peer_id) => {
                 let bytes = self
@@ -206,18 +224,32 @@ impl Ui {
                     .get(peer_id)
                     .copied()
                     .unwrap_or((0, 0));
-                Line::from(vec![
+                let mut spans = vec![
                     Span::styled("active: ", Style::default().fg(BORDER)),
                     Span::styled(
                         format!("{:.16}", peer_id.to_string()),
                         Style::default().fg(SUCCESS).add_modifier(Modifier::BOLD),
                     ),
-                    Span::styled("  ·  ", Style::default().fg(BORDER)),
-                    Span::styled(
-                        format!("↑ {}  ↓ {}", human_bytes(bytes.0), human_bytes(bytes.1)),
-                        Style::default().fg(ACCENT),
-                    ),
-                ])
+                ];
+                if let Some(source) = self.state.destination_sources.get(&server.port) {
+                    let badge = match source {
+                        models::events::DestinationSource::Pinned { rank } => {
+                            format!("pinned[{rank}]")
+                        }
+                        models::events::DestinationSource::Sticky => "sticky".to_string(),
+                        models::events::DestinationSource::Discovered => {
+                            "discovered".to_string()
+                        }
+                    };
+                    spans.push(Span::styled("  ·  ", Style::default().fg(BORDER)));
+                    spans.push(Span::styled(badge, Style::default().fg(PRIMARY)));
+                }
+                spans.push(Span::styled("  ·  ", Style::default().fg(BORDER)));
+                spans.push(Span::styled(
+                    format!("↑ {}  ↓ {}", human_bytes(bytes.0), human_bytes(bytes.1)),
+                    Style::default().fg(ACCENT),
+                ));
+                Line::from(spans)
             }
             None => Line::from(vec![
                 Span::styled("active: ", Style::default().fg(BORDER)),
@@ -235,21 +267,53 @@ impl Ui {
             .map(|v| v.len())
             .unwrap_or(0);
 
-        let lines = vec![
+        let mut lines = vec![
             Line::from(vec![Span::styled(
                 filter_text,
                 Style::default().fg(FOREGROUND),
             )]),
             Line::from(""),
             active_line,
-            Line::from(vec![
+        ];
+        // Pinned servers list every rank with its health; discovery
+        // servers show the candidate-pool size instead.
+        if let Some(statuses) = self
+            .state
+            .pinned_statuses
+            .get(&server.port)
+            .filter(|s| !s.is_empty())
+        {
+            let active = self.state.active_destinations.get(&server.port);
+            for status in statuses {
+                let (badge, badge_style) = if Some(&status.peer_id) == active {
+                    ("active", Style::default().fg(SUCCESS).add_modifier(Modifier::BOLD))
+                } else if status.resolvable {
+                    ("ok", Style::default().fg(ACCENT))
+                } else {
+                    ("STALE", Style::default().fg(WARN).add_modifier(Modifier::BOLD))
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("  [{}] ", status.rank),
+                        Style::default().fg(BORDER),
+                    ),
+                    Span::styled(
+                        format!("{:.16}", status.peer_id.to_string()),
+                        Style::default().fg(FOREGROUND),
+                    ),
+                    Span::styled("  ", Style::default()),
+                    Span::styled(badge, badge_style),
+                ]));
+            }
+        } else {
+            lines.push(Line::from(vec![
                 Span::styled("pool: ", Style::default().fg(BORDER)),
                 Span::styled(
                     format!("{pool_size} candidate{}", if pool_size == 1 { "" } else { "s" }),
                     Style::default().fg(ACCENT),
                 ),
-            ]),
-        ];
+            ]));
+        }
 
         let title = format!(
             " ▾ :{}  ({:?}) {} ",

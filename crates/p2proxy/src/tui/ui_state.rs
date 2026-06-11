@@ -137,6 +137,16 @@ pub struct UIState {
     /// ActiveDestination` keeps the two in sync.
     pub active_destinations: HashMap<u16, PeerId>,
 
+    /// How each server's active destination was chosen (pinned rank /
+    /// sticky / discovered). Keyed by port, in lock-step with
+    /// `active_destinations`.
+    pub destination_sources: HashMap<u16, models::events::DestinationSource>,
+
+    /// Per-rank resolvability of each server's pinned preference list,
+    /// refreshed on every pinned connect pass (BIT-597). Stale entries
+    /// render with a STALE badge in the NETWORK tab.
+    pub pinned_statuses: HashMap<u16, Vec<models::events::PinnedPeerStatus>>,
+
     /// Map a session ID back to the peer it's routed through. Lets
     /// us attribute `BandwidthEvents` (which only carry the session
     /// ID) to a peer so we can show per-peer throughput.
@@ -165,6 +175,8 @@ impl UIState {
             last_error: None,
             server_pools: HashMap::new(),
             active_destinations: HashMap::new(),
+            destination_sources: HashMap::new(),
+            pinned_statuses: HashMap::new(),
             session_peer: HashMap::new(),
             peer_bandwidth: HashMap::new(),
         }
