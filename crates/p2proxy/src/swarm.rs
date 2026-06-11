@@ -183,6 +183,10 @@ pub struct Bootstrapped {
     /// Last known per-(port, pinned-peer) resolvability — stale-peer log
     /// lines fire on transitions, not every retry pass.
     pinned_resolvable: std::collections::HashMap<(u16, PeerId), bool>,
+
+    /// Remembered exit peer per discovery-driven server, persisted in
+    /// `sticky_peers.json` next to `node_keypair.bin` (BIT-597).
+    sticky: crate::sticky::StickyStore,
 }
 
 /// Minimum wall-clock gap between successive eager re-discoveries for
@@ -480,6 +484,7 @@ impl ProxyNetwork<NetworkConnect> {
             last_rediscovery: std::collections::HashMap::new(),
             resolve_supported: None,
             pinned_resolvable: std::collections::HashMap::new(),
+            sticky: crate::sticky::StickyStore::load(crate::sticky::default_sticky_path()),
         }))
     }
 }
@@ -549,6 +554,7 @@ impl ProxyNetwork<Bootstrapped> {
             headless: self.0.headless,
             resolve_supported: &mut self.0.resolve_supported,
             pinned_resolvable: &mut self.0.pinned_resolvable,
+            sticky: &mut self.0.sticky,
         }
     }
 
@@ -794,7 +800,7 @@ impl ProxyNetwork<Bootstrapped> {
                 // the TUI updates, and finally sends the peer back to
                 // the requesting session via the oneshot.
                 counter!("p2proxy_peer_requests_total").increment(1);
-                match crate::discovery::connect(self.discovery_engine(), server_config, shutdown).await {
+                match crate::discovery::connect(self.discovery_engine(), server_config, shutdown, None).await {
                     Ok(destination) => {
                         counter!("p2proxy_peer_discoveries_successful_total").increment(1);
                         if let Some(handle) =
@@ -917,7 +923,7 @@ impl ProxyNetwork<Bootstrapped> {
                     port = server_config.port,
                     "destination peer disconnected — running eager rediscovery"
                 );
-                match crate::discovery::connect(self.discovery_engine(), server_config, shutdown)
+                match crate::discovery::connect(self.discovery_engine(), server_config, shutdown, Some(old_peer))
                     .await
                 {
                     Ok(destination) => {
@@ -975,7 +981,7 @@ impl ProxyNetwork<Bootstrapped> {
                     return Ok(());
                 };
                 info!(port = server_config.port, "running initial peer discovery");
-                match crate::discovery::connect(self.discovery_engine(), server_config, shutdown).await {
+                match crate::discovery::connect(self.discovery_engine(), server_config, shutdown, None).await {
                     Ok(destination) => {
                         info!(peer = ?destination.peer, port = server_config.port, "destination peer discovered");
                         handle.store(Arc::new(Some(destination.peer)));

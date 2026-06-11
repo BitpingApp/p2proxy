@@ -15,6 +15,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 
 mod discovery;
 mod proxy_protocols;
+mod sticky;
 mod stream_pool;
 mod swarm;
 mod tui;

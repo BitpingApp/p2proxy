@@ -42,6 +42,8 @@ pub(crate) struct DiscoveryEngine<'a> {
     /// Last known per-(port, peer) resolvability, so stale-peer log lines
     /// fire on transitions instead of every retry pass.
     pub pinned_resolvable: &'a mut HashMap<(u16, PeerId), bool>,
+    /// Remembered exit peer per discovery-driven server (BIT-597).
+    pub sticky: &'a mut crate::sticky::StickyStore,
 }
 
 /// The outcome of [`connect`]: the adopted destination and how it was chosen.

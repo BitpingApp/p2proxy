@@ -17,17 +17,98 @@ use crate::utils::wait_ext::SwarmWaitExt;
 use super::{resolve, ConnectedDestination, DiscoveryEngine};
 
 /// Connect `server` to a destination peer: the ordered `destination_peers`
-/// preference list when pinned, otherwise attribute-filtered discovery.
+/// preference list when pinned, otherwise sticky-reuse + attribute-filtered
+/// discovery. `avoid` is the peer that just disconnected (the hub usually
+/// hasn't noticed yet, so re-dialing it first would waste a 10s wait).
 pub(crate) async fn connect(
     engine: DiscoveryEngine<'_>,
     server: &Server,
     shutdown: &tokio_util::sync::CancellationToken,
+    avoid: Option<PeerId>,
 ) -> Result<ConnectedDestination, color_eyre::eyre::Error> {
     let pinned = server.peer_options.pinned();
     if pinned.is_empty() {
-        return connect_discovered(engine, server, shutdown).await;
+        return connect_discovered(engine, server, shutdown, avoid).await;
     }
     connect_pinned(engine, server, &pinned, shutdown).await
+}
+
+/// Best-effort sticky pre-pass: re-resolve the remembered exit peer and try
+/// it once before discovery. Failure forgets the entry and falls through —
+/// unlike pinning, sticky never blocks on a dead peer.
+async fn try_sticky_peer(
+    engine: &mut DiscoveryEngine<'_>,
+    server: &Server,
+    shutdown: &tokio_util::sync::CancellationToken,
+    avoid: Option<PeerId>,
+) -> Result<Option<PeerId>> {
+    if !server.peer_options.sticky {
+        return Ok(None);
+    }
+    let fingerprint = server.peer_options.filter_fingerprint(server.port);
+    let Some(remembered) = engine.sticky.get(server.port, &fingerprint) else {
+        return Ok(None);
+    };
+    if Some(remembered) == avoid {
+        debug!(
+            peer = %remembered,
+            port = server.port,
+            "sticky peer just disconnected — skipping straight to discovery"
+        );
+        return Ok(None);
+    }
+
+    let remembered_ids = [remembered];
+    let resolution = tokio::select! {
+        r = resolve::resolve_pinned_routes(engine, &remembered_ids) => r,
+        _ = shutdown.cancelled() => bail!("Shutdown requested during sticky-route resolution"),
+    };
+    let addrs: HashSet<libp2p::Multiaddr> = match resolution {
+        Ok(routes) => routes.into_values().flatten().collect(),
+        Err(resolve::ResolveError::Unsupported(_)) => {
+            resolve::synthesize_circuit(engine.relay_address, remembered)
+                .into_iter()
+                .collect()
+        }
+        Err(e @ resolve::ResolveError::TaskPanicked(_)) => return Err(e.into()),
+    };
+
+    if !addrs.is_empty()
+        && let Some(peer) = dial_and_wait(engine, &addrs, shutdown).await?
+    {
+        counter!("p2proxy_sticky_hits_total", "port" => server.port.to_string()).increment(1);
+        info!(%peer, port = server.port, "reconnected to sticky exit peer");
+        return Ok(Some(peer));
+    }
+
+    counter!("p2proxy_sticky_misses_total", "port" => server.port.to_string()).increment(1);
+    info!(
+        peer = %remembered,
+        port = server.port,
+        "sticky exit peer is gone — discovering a replacement"
+    );
+    engine.sticky.forget(server.port);
+    Ok(None)
+}
+
+/// Persist a freshly-discovered exit so the next restart/reconnect re-uses
+/// it. The hint line is the graduation path from learned affinity to an
+/// explicit pin: copy the id into `destination_peers` and the exit survives
+/// even a deleted `sticky_peers.json`.
+fn remember_sticky_choice(engine: &mut DiscoveryEngine<'_>, server: &Server, peer: PeerId) {
+    if !server.peer_options.sticky {
+        return;
+    }
+    let fingerprint = server.peer_options.filter_fingerprint(server.port);
+    match engine.sticky.remember(server.port, &fingerprint, peer) {
+        Ok(true) => info!(
+            %peer,
+            port = server.port,
+            "sticky exit for this server is now {peer} — add it to destination_peers in Config.yaml to pin it permanently"
+        ),
+        Ok(false) => {}
+        Err(e) => warn!(?e, port = server.port, "could not persist sticky exit peer"),
+    }
 }
 
 /// Ordered-preference pinned connect: every pass batch-resolves the whole
@@ -127,7 +208,7 @@ async fn connect_pinned(
                 );
                 counter!("p2proxy_pinned_fallback_total", "port" => server.port.to_string())
                     .increment(1);
-                return connect_discovered(engine, server, shutdown).await;
+                return connect_discovered(engine, server, shutdown, None).await;
             }
 
             tokio::select! {
@@ -228,14 +309,24 @@ fn emit_pinned_statuses(
 }
 
 /// Discover candidates for `server` and connect to one, retrying with the
-/// same filters until a peer is adopted. In TUI mode an exhausted cycle
-/// surfaces an `Events::Error` and starts over after a backoff; headless
-/// mode bails so the failure is visible in logs/exit code.
+/// same filters until a peer is adopted. The sticky pre-pass runs first so
+/// restarts/reconnects keep the same exit IP whenever the remembered peer is
+/// still reachable. In TUI mode an exhausted cycle surfaces an
+/// `Events::Error` and starts over after a backoff; headless mode bails so
+/// the failure is visible in logs/exit code.
 async fn connect_discovered(
     mut engine: DiscoveryEngine<'_>,
     server: &Server,
     shutdown: &tokio_util::sync::CancellationToken,
+    avoid: Option<PeerId>,
 ) -> Result<ConnectedDestination, color_eyre::eyre::Error> {
+    if let Some(peer) = try_sticky_peer(&mut engine, server, shutdown, avoid).await? {
+        return Ok(ConnectedDestination {
+            peer,
+            source: DestinationSource::Sticky,
+        });
+    }
+
     const MAX_RETRIES: usize = 20;
     // Outer loop only re-enters in TUI mode after a full 20-retry
     // exhaustion — emits an Events::Error so the operator sees the
@@ -294,10 +385,11 @@ async fn connect_discovered(
 
             match dial_and_wait(&mut engine, &destination_addresses, shutdown).await? {
                 Some(peer_id) => {
+                    remember_sticky_choice(&mut engine, server, peer_id);
                     return Ok(ConnectedDestination {
                         peer: peer_id,
                         source: DestinationSource::Discovered,
-                    })
+                    });
                 }
                 None => {
                     warn!("Connection timeout reached");
