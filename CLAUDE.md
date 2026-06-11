@@ -160,6 +160,10 @@ Prometheus metrics are exposed at `http://localhost:9091/metrics` and include co
 
 The application generates and persists a libp2p keypair in `node_keypair.bin` for consistent peer identity across restarts.
 
+### Sticky exit peers
+
+Discovery-driven servers (`sticky: true`, the default) persist their chosen exit peer in `sticky_peers.json` — same CWD convention as `node_keypair.bin` — so restarts re-use the same egress IP. Entries carry a fingerprint of the server's filters (`country`, `min_bandwidth`, port) and are invalidated when those change. See `src/sticky.rs` and `src/discovery/` (peer resolution + ordered pinned-peer connect, BIT-597).
+
 ## Testing Infrastructure
 
 P2Proxy has a comprehensive test suite with the following structure:

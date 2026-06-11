@@ -25,6 +25,29 @@ servers:
     # Optional: pin to a country (ISO-3166 alpha-2). Omit for any country.
     # country: NL
 
+    # Optional: ordered pinned-peer preference list for stable egress IPs.
+    # Entries are bare peer ids (preferred — the current route is resolved
+    # through the hub on every connect, so the peer stays reachable even
+    # when it moves hubs) or full multiaddrs ending in /p2p/<peer-id>.
+    # The FIRST entry is always tried first; later entries are failovers.
+    #
+    # destination_peers:
+    #   - 12D3KooWPrimaryPeerId...
+    #   - 12D3KooWBackupPeerId...
+
+    # When every pinned peer is offline: false (default) keeps retrying the
+    # list and surfaces an error — the egress IP never silently changes;
+    # true falls back to country/min_bandwidth discovery.
+    #
+    # fallback_to_discovery: false
+
+    # Remember the discovered exit peer in sticky_peers.json and reconnect
+    # to it across restarts for a stable egress IP (default: true). Only
+    # applies to servers without destination_peers. Set false to get a
+    # fresh exit on every restart.
+    #
+    # sticky: true
+
     # Optional: connection pool tuning. The pool keeps a warm set of P2P
     # streams open so SOCKS5 handshakes don't pay the libp2p dial cost.
     # All fields below have sensible defaults; uncomment to override.

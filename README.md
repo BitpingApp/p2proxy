@@ -4,6 +4,7 @@ A peer-to-peer SOCKS5 proxy daemon built on [libp2p](https://libp2p.io/). Routes
 
 - **SOCKS5** on a local port — point any application (browser, curl, Playwright, an entire WireGuard tunnel) at it.
 - **Multi-peer routing** — pick by minimum bandwidth, country, or specific peer ID.
+- **Stable egress IPs** — pin an ordered list of peer IDs, or let sticky mode remember the discovered exit across restarts.
 - **Connection pooling** — keeps warm streams open so per-request latency stays low.
 - **Prometheus metrics** for observability.
 - **TUI** for live status; `--no-ui` for headless / systemd / Docker.
@@ -119,8 +120,61 @@ Requires a recent stable Rust toolchain (`rustup install stable`).
 | `port` | u16 | — | Local TCP port to listen on for incoming SOCKS5 connections. |
 | `min_bandwidth` | string | `0Mbps` | Minimum advertised bandwidth a peer must have to be selected. Format: `<N>{Kbps,Mbps,Gbps}`. |
 | `country` | string | — | Optional ISO-3166 alpha-2 country code (e.g. `US`, `DE`, `JP`). Omit to allow any country. |
-| `destination_peer` | string | — | Optional explicit libp2p multiaddr to route exclusively through. Use this to pin traffic to a known peer instead of letting the network pick one. |
+| `destination_peers` | list | — | Ordered pinned-peer preference list for stable egress IPs. Each entry is a bare peer id (preferred) or a full multiaddr ending in `/p2p/<peer-id>`. See [Pinning & sticky peers](#pinning--sticky-peers). |
+| `fallback_to_discovery` | bool | `false` | When every pinned peer is offline: `false` keeps retrying the list (hard pin); `true` falls back to country/bandwidth discovery. |
+| `sticky` | bool | `true` | Remember the discovered exit peer and reconnect to it across restarts for a stable egress IP. Ignored when `destination_peers` is set. |
+| `destination_peer` | string | — | **Deprecated** — use `destination_peers`. A single pinned multiaddr; treated as a one-entry preference list. |
 | `pool` | object | — | Optional connection-pool tuning (below). |
+
+### Pinning & sticky peers
+
+Both features exist for **stable egress IPs** — the exit IP your traffic appears from
+only changes when the underlying node actually becomes unreachable (or its own ISP
+reassigns its address; peer identity is stable, IP stability is as good as that
+node's connection).
+
+**Pinned peers** (`destination_peers`) is an *ordered preference list*:
+
+```yaml
+servers:
+  - protocol: Socks5
+    port: 1080
+    destination_peers:
+      - 12D3KooWPrimaryPeerId...      # always tried first
+      - 12D3KooWBackupPeerId...       # only used while the primary is unreachable
+```
+
+- Bare peer ids are resolved to the peer's *current* route through the hub on every
+  (re)connect — pinning survives the peer moving between hubs. Full multiaddrs are
+  also dialed verbatim.
+- **Hard pin by default**: when every listed peer is offline, p2proxy keeps retrying
+  the list and surfaces an error in the TUI/logs — it never silently routes through
+  an arbitrary node. Set `fallback_to_discovery: true` to prefer availability.
+- The NETWORK tab shows each rank with `active` / `ok` / `STALE` health, and the
+  `p2proxy_pinned_peer_resolvable{port,rank}` metric exposes the same for alerting.
+- In headless mode an all-offline pinned list fails the current discovery cycle and
+  retries on the next SOCKS session (JIT), matching the existing discovery behavior.
+
+**Sticky peers** (`sticky: true`, the default for unpinned servers) gives stable IPs
+*without knowing any peer ids up front*: the first discovery that matches your
+`country`/`min_bandwidth` filters is remembered in `sticky_peers.json` (written next
+to `node_keypair.bin`) and re-used across restarts and reconnects. When the
+remembered peer is gone, discovery picks a replacement and remembers that instead —
+best-effort, never blocking. Changing the server's filters (or port) invalidates the
+remembered peer automatically.
+
+The log line `sticky exit for this server is now <peer-id>` tells you what was
+learned — copy that id into `destination_peers` to make the pin explicit and
+permanent.
+
+Multiple `servers` entries in one config never conflict — the store keeps one
+entry per listen port. Multiple p2proxy *instances* must run from different
+working directories (each owns its own `sticky_peers.json`, same as
+`node_keypair.bin` — instances sharing a CWD would already share identity and
+would overwrite each other's sticky state).
+
+> **Changed behavior:** restarts no longer rotate your exit IP by default. Set
+> `sticky: false` to restore the old pick-a-fresh-peer-per-restart behavior.
 
 ### Per-server connection pool
 
