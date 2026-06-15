@@ -5,9 +5,9 @@
 
 use color_eyre::eyre::Result;
 use crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode},
+    event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, MouseEventKind},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use futures::StreamExt;
 use models::events::Events;
@@ -21,7 +21,7 @@ use std::{
 };
 use tokio::{select, sync::mpsc::Receiver, time::interval};
 use tracing::{debug, info};
-use ui_state::{ConnectionStatus, ProxySession, UIState};
+use ui_state::{AddrSource, ConnectionStatus, ProxySession, UIState};
 
 mod logs;
 mod network;
@@ -147,6 +147,27 @@ impl Ui {
     pub fn toggle_logs(&mut self) {
         self.show_logs = !self.show_logs;
         self.start_animation()
+    }
+
+    /// The logs are scrollable when the LOGS tab is selected or the logs
+    /// panel is toggled on — both render the same `log_state`.
+    fn logs_focused(&self) -> bool {
+        self.tabs.get(self.tab_index) == Some(&"LOGS") || self.show_logs
+    }
+
+    /// Drive the log viewport's scroll state. Returns `true` when `code` was a
+    /// scroll key (so the caller skips the normal tab/network bindings). j/k
+    /// and arrows page through history; Esc resumes following the tail.
+    fn scroll_logs(&mut self, code: KeyCode) -> bool {
+        use tui_logger::TuiWidgetEvent;
+        let event = match code {
+            KeyCode::Char('j') | KeyCode::Down | KeyCode::PageDown => TuiWidgetEvent::NextPageKey,
+            KeyCode::Char('k') | KeyCode::Up | KeyCode::PageUp => TuiWidgetEvent::PrevPageKey,
+            KeyCode::Esc => TuiWidgetEvent::EscapeKey,
+            _ => return false,
+        };
+        self.log_state.transition(event);
+        true
     }
 
     /// Network tab: move the focus to the next server (wrapping).
@@ -278,6 +299,8 @@ impl Ui {
                                 | PromptKeyOutcome::Redraw
                                 | PromptKeyOutcome::Ignored => {}
                             }
+                        } else if ui.logs_focused() && ui.scroll_logs(key.code) {
+                            // Scroll key consumed by the log viewport.
                         } else {
                         match key.code {
                             KeyCode::Char('q') => {
@@ -343,6 +366,25 @@ impl Ui {
                             _ => {}
                         }
                         }  // close else (export-prompt is_open branch)
+                    } else if let Event::Mouse(mouse) = event {
+                        // Wheel scrolls the log viewport when it's focused —
+                        // up pages back, down pages forward. Other mouse
+                        // events are ignored.
+                        if ui.logs_focused() {
+                            let scroll = match mouse.kind {
+                                MouseEventKind::ScrollUp => {
+                                    Some(tui_logger::TuiWidgetEvent::PrevPageKey)
+                                }
+                                MouseEventKind::ScrollDown => {
+                                    Some(tui_logger::TuiWidgetEvent::NextPageKey)
+                                }
+                                _ => None,
+                            };
+                            if let Some(scroll) = scroll {
+                                ui.log_state.transition(scroll);
+                                ui.mark_dirty();
+                            }
+                        }
                     }
                 }
             };
@@ -401,6 +443,10 @@ impl Ui {
                     // standby rows in the NETWORK tab.
                     self.state.peers.remove(&peer_id);
                     self.state.peer_bandwidth.remove(&peer_id);
+                    // Drop the learned route too — a remembered direct IP
+                    // would otherwise outrank a fresh relayed route on the
+                    // next reconnect and render as a stale "live" egress.
+                    self.state.peer_addresses.remove(&peer_id);
                     for pool in self.state.server_pools.values_mut() {
                         pool.retain(|p| *p != peer_id);
                     }
@@ -410,7 +456,9 @@ impl Ui {
                     // via the `PeerDisconnected` flow, but doing it
                     // here too means the TUI stays consistent if
                     // either event arrives first.
-                    self.state.active_destinations.retain(|_port, p| *p != peer_id);
+                    self.state
+                        .active_destinations
+                        .retain(|_port, p| *p != peer_id);
                     // Only flip the global status to Disconnected if
                     // every peer is gone — keeps the OVERVIEW status
                     // "Connected" while some destinations are still
@@ -469,17 +517,64 @@ impl Ui {
                 self.state.last_error = Some(message);
             }
             Events::ServerPool { port, peers } => {
+                // Record each candidate's hub-resolved route, preferring a
+                // direct address over a relay circuit when the hub offered
+                // both. note_peer_address keeps the active peer's live
+                // direct route from being clobbered by this candidate.
+                for pp in &peers {
+                    let candidate = pp
+                        .addresses
+                        .iter()
+                        .find(|a| AddrSource::classify_candidate(a) == AddrSource::Direct)
+                        .or_else(|| pp.addresses.first());
+                    if let Some(addr) = candidate {
+                        self.state.note_peer_address(
+                            pp.peer_id,
+                            addr.clone(),
+                            AddrSource::Candidate,
+                        );
+                    }
+                }
                 // Replace, don't merge — the new FindNodes result is
                 // the current truth for this server. Previous peers
                 // that fell out of the country/bandwidth filters drop
                 // out of the table automatically.
-                self.state.server_pools.insert(port, peers);
+                let mut ids: Vec<_> = peers.into_iter().map(|pp| pp.peer_id).collect();
+                // Keep the active peer visible even if it's a sticky/JIT
+                // exit the latest FindNodes set doesn't include.
+                if let Some(active) = self.state.active_destinations.get(&port) {
+                    if !ids.contains(active) {
+                        ids.push(*active);
+                    }
+                }
+                self.state.server_pools.insert(port, ids);
+            }
+            Events::PeerRoute {
+                peer_id,
+                address,
+                relayed,
+            } => {
+                let source = if relayed {
+                    AddrSource::Relayed
+                } else {
+                    AddrSource::Direct
+                };
+                self.state.note_peer_address(peer_id, address, source);
             }
             Events::ActiveDestination { port, peer, source } => {
                 match peer {
                     Some(p) => {
                         self.state.peers.insert(p);
                         self.state.active_destinations.insert(port, p);
+                        // A sticky-reuse reconnect adopts a peer without
+                        // running discovery, so no ServerPool event places
+                        // it in the rotation pool. Insert it ourselves so
+                        // the active row is always visible (and obviously
+                        // matches sticky_peers.json).
+                        let pool = self.state.server_pools.entry(port).or_default();
+                        if !pool.contains(&p) {
+                            pool.push(p);
+                        }
                         match source {
                             Some(s) => {
                                 self.state.destination_sources.insert(port, s);

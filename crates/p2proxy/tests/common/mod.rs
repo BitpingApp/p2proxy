@@ -34,15 +34,15 @@
 //! }
 //! ```
 
-pub mod mock_swarm;
-pub mod mock_relay;
-pub mod mock_peer;
 pub mod fixtures;
+pub mod mock_peer;
+pub mod mock_relay;
+pub mod mock_swarm;
 pub mod test_utils;
 
 // Re-export commonly used types
-pub use mock_swarm::{MockSwarm, MockSwarmConfig, MockSwarmEvent};
-pub use mock_relay::{MockRelay, MockRelayConfig};
-pub use mock_peer::{MockPeer, MockPeerConfig};
 pub use fixtures::*;
+pub use mock_peer::{MockPeer, MockPeerConfig};
+pub use mock_relay::{MockRelay, MockRelayConfig};
+pub use mock_swarm::{MockSwarm, MockSwarmConfig, MockSwarmEvent};
 pub use test_utils::*;

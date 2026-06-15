@@ -8,7 +8,7 @@
 //! These benchmarks use the criterion framework with async tokio support
 //! and mock components configured with realistic latencies.
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use libp2p::PeerId;
 use std::time::Duration;
 
@@ -39,13 +39,14 @@ fn bench_connection_establishment(c: &mut Criterion) {
             BenchmarkId::new("latency_ms", latency_ms),
             latency_ms,
             |b, _| {
-                b.to_async(tokio::runtime::Runtime::new().unwrap()).iter(|| async {
-                    let mut swarm = MockSwarm::new(config.clone());
-                    let peer_id = PeerId::random();
+                b.to_async(tokio::runtime::Runtime::new().unwrap())
+                    .iter(|| async {
+                        let mut swarm = MockSwarm::new(config.clone());
+                        let peer_id = PeerId::random();
 
-                    // Measure connection establishment
-                    let _ = swarm.connect_to_peer(peer_id).await;
-                });
+                        // Measure connection establishment
+                        let _ = swarm.connect_to_peer(peer_id).await;
+                    });
             },
         );
     }
@@ -75,13 +76,14 @@ fn bench_socks5_handshake(c: &mut Criterion) {
             BenchmarkId::new("latency_ms", latency_ms),
             latency_ms,
             |b, _| {
-                b.to_async(tokio::runtime::Runtime::new().unwrap()).iter(|| async {
-                    let mut peer = MockPeer::new(config.clone());
+                b.to_async(tokio::runtime::Runtime::new().unwrap())
+                    .iter(|| async {
+                        let mut peer = MockPeer::new(config.clone());
 
-                    // Simulate SOCKS5 handshake (2 round-trips)
-                    let _ = peer.respond_to_query(b"socks5_greeting").await;
-                    let _ = peer.respond_to_query(b"socks5_connect").await;
-                });
+                        // Simulate SOCKS5 handshake (2 round-trips)
+                        let _ = peer.respond_to_query(b"socks5_greeting").await;
+                        let _ = peer.respond_to_query(b"socks5_connect").await;
+                    });
             },
         );
     }
@@ -113,12 +115,13 @@ fn bench_small_message_rtt(c: &mut Criterion) {
             BenchmarkId::new("latency_ms", latency_ms),
             latency_ms,
             |b, _| {
-                b.to_async(tokio::runtime::Runtime::new().unwrap()).iter(|| async {
-                    let mut peer = MockPeer::new(config.clone());
+                b.to_async(tokio::runtime::Runtime::new().unwrap())
+                    .iter(|| async {
+                        let mut peer = MockPeer::new(config.clone());
 
-                    // Send message and wait for response
-                    let _ = peer.respond_to_query(&message).await;
-                });
+                        // Send message and wait for response
+                        let _ = peer.respond_to_query(&message).await;
+                    });
             },
         );
     }
@@ -143,11 +146,12 @@ fn bench_direct_vs_relay(c: &mut Criterion) {
     };
 
     group.bench_function("direct_connection", |b| {
-        b.to_async(tokio::runtime::Runtime::new().unwrap()).iter(|| async {
-            let mut swarm = MockSwarm::new(direct_config.clone());
-            let peer_id = PeerId::random();
-            let _ = swarm.connect_to_peer(peer_id).await;
-        });
+        b.to_async(tokio::runtime::Runtime::new().unwrap())
+            .iter(|| async {
+                let mut swarm = MockSwarm::new(direct_config.clone());
+                let peer_id = PeerId::random();
+                let _ = swarm.connect_to_peer(peer_id).await;
+            });
     });
 
     // Relay connection (adds relay overhead)
@@ -160,11 +164,12 @@ fn bench_direct_vs_relay(c: &mut Criterion) {
     };
 
     group.bench_function("relay_connection", |b| {
-        b.to_async(tokio::runtime::Runtime::new().unwrap()).iter(|| async {
-            let mut swarm = MockSwarm::new(relay_config.clone());
-            let peer_id = PeerId::random();
-            let _ = swarm.connect_to_peer(peer_id).await;
-        });
+        b.to_async(tokio::runtime::Runtime::new().unwrap())
+            .iter(|| async {
+                let mut swarm = MockSwarm::new(relay_config.clone());
+                let peer_id = PeerId::random();
+                let _ = swarm.connect_to_peer(peer_id).await;
+            });
     });
 
     group.finish();
@@ -187,26 +192,29 @@ fn bench_peer_queries(c: &mut Criterion) {
 
     // Benchmark ping query
     group.bench_function("ping", |b| {
-        b.to_async(tokio::runtime::Runtime::new().unwrap()).iter(|| async {
-            let mut peer = MockPeer::new(config.clone());
-            let _ = peer.respond_to_query(b"ping").await;
-        });
+        b.to_async(tokio::runtime::Runtime::new().unwrap())
+            .iter(|| async {
+                let mut peer = MockPeer::new(config.clone());
+                let _ = peer.respond_to_query(b"ping").await;
+            });
     });
 
     // Benchmark peer info query
     group.bench_function("peer_info", |b| {
-        b.to_async(tokio::runtime::Runtime::new().unwrap()).iter(|| async {
-            let mut peer = MockPeer::new(config.clone());
-            let _ = peer.respond_to_query(b"peer_info").await;
-        });
+        b.to_async(tokio::runtime::Runtime::new().unwrap())
+            .iter(|| async {
+                let mut peer = MockPeer::new(config.clone());
+                let _ = peer.respond_to_query(b"peer_info").await;
+            });
     });
 
     // Benchmark find nodes query
     group.bench_function("find_nodes", |b| {
-        b.to_async(tokio::runtime::Runtime::new().unwrap()).iter(|| async {
-            let mut peer = MockPeer::new(config.clone());
-            let _ = peer.respond_to_query(b"find_nodes").await;
-        });
+        b.to_async(tokio::runtime::Runtime::new().unwrap())
+            .iter(|| async {
+                let mut peer = MockPeer::new(config.clone());
+                let _ = peer.respond_to_query(b"find_nodes").await;
+            });
     });
 
     group.finish();

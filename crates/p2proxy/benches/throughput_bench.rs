@@ -9,7 +9,7 @@
 //!
 //! Run with: cargo bench --bench throughput_bench
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use std::time::Duration;
 
 // Test data generation (inline to avoid dependency issues in benchmarks)
@@ -263,11 +263,7 @@ fn bench_hash_and_transfer(c: &mut Criterion) {
 fn bench_bidirectional_transfer(c: &mut Criterion) {
     let mut group = c.benchmark_group("bidirectional_transfer");
 
-    let sizes = vec![
-        ("10KB", 10_240),
-        ("100KB", 102_400),
-        ("1MB", 1_048_576),
-    ];
+    let sizes = vec![("10KB", 10_240), ("100KB", 102_400), ("1MB", 1_048_576)];
 
     for (name, size) in sizes {
         group.throughput(Throughput::Bytes((size * 2) as u64)); // Both directions
@@ -347,17 +343,21 @@ fn bench_memory_operations(c: &mut Criterion) {
         });
 
         // Benchmark: To Vec (chunk iteration)
-        group.bench_with_input(BenchmarkId::new("to_vec_chunked", name), &size, |b, &size| {
-            let data = generate_bench_data(size);
+        group.bench_with_input(
+            BenchmarkId::new("to_vec_chunked", name),
+            &size,
+            |b, &size| {
+                let data = generate_bench_data(size);
 
-            b.iter(|| {
-                let mut result = Vec::new();
-                for chunk in data.chunks(8192) {
-                    result.extend_from_slice(chunk);
-                }
-                black_box(result)
-            });
-        });
+                b.iter(|| {
+                    let mut result = Vec::new();
+                    for chunk in data.chunks(8192) {
+                        result.extend_from_slice(chunk);
+                    }
+                    black_box(result)
+                });
+            },
+        );
     }
 
     group.finish();

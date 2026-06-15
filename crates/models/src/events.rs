@@ -1,5 +1,5 @@
+use libp2p::{Multiaddr, PeerId};
 use p2p_bandwidth_protocol::TargetAddr;
-use libp2p::PeerId;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18,10 +18,26 @@ pub enum Events {
     /// of candidate peers matching the server's country/bandwidth
     /// filters. Lets the TUI's NETWORK tab show "pool: 7 candidates"
     /// alongside the active destination. Replaces whatever pool was
-    /// previously known for `port`.
+    /// previously known for `port`. Each candidate carries the dial
+    /// routes the hub resolved for it (usually a relay-circuit address;
+    /// a direct address when the homing hub advertises one) so the
+    /// rotation pool can show where a peer is reachable.
     ServerPool {
         port: u16,
-        peers: Vec<libp2p::PeerId>,
+        peers: Vec<PoolPeer>,
+    },
+    /// A peer's current connection endpoint, observed on every
+    /// `ConnectionEstablished` — including the fresh one a DCUtR
+    /// hole-punch raises when it upgrades a relayed circuit to a direct
+    /// link. Lets the NETWORK tab show the real egress address of the
+    /// peer actually carrying traffic instead of just its relay route.
+    /// `relayed` is taken from the connection endpoint itself (so an
+    /// inbound relayed connection, whose remote address is a bare
+    /// `/p2p/<id>` with no circuit marker, is still classified correctly).
+    PeerRoute {
+        peer_id: PeerId,
+        address: Multiaddr,
+        relayed: bool,
     },
     /// The active destination peer for a server changed. Fired when a
     /// fresh discover-and-connect lands (initial discovery or
@@ -42,6 +58,14 @@ pub enum Events {
         port: u16,
         statuses: Vec<PinnedPeerStatus>,
     },
+}
+
+/// One candidate in a server's FindNodes pool: the peer plus the dial
+/// routes the hub resolved for it this pass.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PoolPeer {
+    pub peer_id: PeerId,
+    pub addresses: Vec<Multiaddr>,
 }
 
 /// How a server's active destination was selected.

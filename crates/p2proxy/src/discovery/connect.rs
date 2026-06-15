@@ -5,21 +5,23 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
-use color_eyre::eyre::{bail, Result};
-use libp2p::{multiaddr::Protocol, swarm::SwarmEvent, PeerId};
+use color_eyre::eyre::{Result, bail};
+use futures::StreamExt;
+use libp2p::{Multiaddr, PeerId, multiaddr::Protocol, swarm::SwarmEvent};
 use metrics::counter;
-use models::config::{DestinationPeerEntry, Server};
+use models::config::{DestinationPeerEntry, Server, StickyReconnect};
 use models::events::{DestinationSource, Events, PinnedPeerStatus};
 use tracing::{debug, info, warn};
 
 use crate::utils::wait_ext::SwarmWaitExt;
 
-use super::{resolve, ConnectedDestination, DiscoveryEngine};
+use super::{ConnectedDestination, DiscoveryEngine, resolve};
 
 /// Connect `server` to a destination peer: the ordered `destination_peers`
-/// preference list when pinned, otherwise sticky-reuse + attribute-filtered
-/// discovery. `avoid` is the peer that just disconnected (the hub usually
-/// hasn't noticed yet, so re-dialing it first would waste a 10s wait).
+/// preference list when pinned, otherwise sticky-pool reuse + attribute-
+/// filtered discovery. `avoid` is the peer that just disconnected (so the
+/// pool pre-pass and discovery skip it — the hub usually hasn't noticed the
+/// drop yet, so re-dialing it first would waste a 10s wait).
 pub(crate) async fn connect(
     engine: DiscoveryEngine<'_>,
     server: &Server,
@@ -33,74 +35,206 @@ pub(crate) async fn connect(
     connect_pinned(engine, server, &pinned, shutdown).await
 }
 
-/// Best-effort sticky pre-pass: re-resolve the remembered exit peer and try
-/// it once before discovery. Failure forgets the entry and falls through —
-/// unlike pinning, sticky never blocks on a dead peer.
-async fn try_sticky_peer(
+/// How many candidates a fresh discovery fan-out asks the hub for — enough
+/// to dial several in parallel and adopt the first to connect.
+const FINDNODES_DISCOVERY_LIMIT: usize = 25;
+
+/// Does this multiaddr route through a relay circuit (vs a direct address)?
+fn is_relayed(addr: &Multiaddr) -> bool {
+    addr.iter().any(|p| matches!(p, Protocol::P2pCircuit))
+}
+
+/// The destination peer id of a dial address — the LAST `/p2p/` component
+/// (a circuit address carries the relay's id earlier in the path).
+fn last_p2p(addr: &Multiaddr) -> Option<PeerId> {
+    addr.iter()
+        .filter_map(|p| match p {
+            Protocol::P2p(pid) => Some(pid),
+            _ => None,
+        })
+        .last()
+}
+
+/// One reconnect attempt for a known exit `peer`: its remembered direct
+/// address first (no hub round-trip when the IP is unchanged), then the
+/// hub's CURRENT route for it (which follows a peer that migrated hubs),
+/// dialing direct addresses before relay circuits. Returns the adopted peer
+/// on success.
+async fn try_reach_peer(
     engine: &mut DiscoveryEngine<'_>,
     server: &Server,
+    peer: PeerId,
     shutdown: &tokio_util::sync::CancellationToken,
-    avoid: Option<PeerId>,
 ) -> Result<Option<PeerId>> {
-    if !server.peer_options.sticky {
-        return Ok(None);
-    }
-    let fingerprint = server.peer_options.filter_fingerprint(server.port);
-    let Some(remembered) = engine.sticky.get(server.port, &fingerprint) else {
-        return Ok(None);
-    };
-    if Some(remembered) == avoid {
-        debug!(
-            peer = %remembered,
-            port = server.port,
-            "sticky peer just disconnected — skipping straight to discovery"
-        );
-        return Ok(None);
+    // A stored direct address is a bare transport multiaddr (the observed
+    // socket addr from a hole-punched connection); tag it with the peer id
+    // so dial_and_wait's accept-predicate can match the resulting
+    // ConnectionEstablished. `with_p2p` only errs if a different /p2p/ is
+    // already present, which a bare address never has.
+    if let Some(direct) = engine.sticky.direct_address(server.port, peer)
+        && let Ok(addr) = direct.with_p2p(peer)
+    {
+        let set = HashSet::from([addr]);
+        if let Some(reached) = dial_and_wait(engine, &set, shutdown).await? {
+            return Ok(Some(reached));
+        }
     }
 
-    let remembered_ids = [remembered];
+    let peer_ids = [peer];
     let resolution = tokio::select! {
-        r = resolve::resolve_pinned_routes(engine, &remembered_ids) => r,
+        r = resolve::resolve_pinned_routes(engine, &peer_ids) => r,
         _ = shutdown.cancelled() => bail!("Shutdown requested during sticky-route resolution"),
     };
-    let addrs: HashSet<libp2p::Multiaddr> = match resolution {
+    let addrs: Vec<Multiaddr> = match resolution {
         Ok(routes) => routes.into_values().flatten().collect(),
         Err(resolve::ResolveError::Unsupported(_)) => {
-            resolve::synthesize_circuit(engine.relay_address, remembered)
+            resolve::synthesize_circuit(engine.relay_address, peer)
                 .into_iter()
                 .collect()
         }
         Err(e @ resolve::ResolveError::TaskPanicked(_)) => return Err(e.into()),
     };
 
-    if !addrs.is_empty()
-        && let Some(peer) = dial_and_wait(engine, &addrs, shutdown).await?
-    {
-        counter!("p2proxy_sticky_hits_total", "port" => server.port.to_string()).increment(1);
-        info!(%peer, port = server.port, "reconnected to sticky exit peer");
-        return Ok(Some(peer));
+    // Direct routes first, relay circuits as the fallback.
+    let (direct, circuit): (Vec<_>, Vec<_>) = addrs.into_iter().partition(|a| !is_relayed(a));
+    for group in [direct, circuit] {
+        if group.is_empty() {
+            continue;
+        }
+        let set: HashSet<Multiaddr> = group.into_iter().collect();
+        if let Some(reached) = dial_and_wait(engine, &set, shutdown).await? {
+            return Ok(Some(reached));
+        }
     }
-
-    counter!("p2proxy_sticky_misses_total", "port" => server.port.to_string()).increment(1);
-    info!(
-        peer = %remembered,
-        port = server.port,
-        "sticky exit peer is gone — discovering a replacement"
-    );
-    engine.sticky.forget(server.port);
     Ok(None)
 }
 
-/// Persist a freshly-discovered exit so the next restart/reconnect re-uses
-/// it. The hint line is the graduation path from learned affinity to an
-/// explicit pin: copy the id into `destination_peers` and the exit survives
-/// even a deleted `sticky_peers.json`.
-fn remember_sticky_choice(engine: &mut DiscoveryEngine<'_>, server: &Server, peer: PeerId) {
+/// Fight to reconnect to the SAME exit `peer` after it dropped: retry
+/// [`try_reach_peer`] with exponential backoff so a transient circuit cycle
+/// doesn't rotate the egress IP. Returns `None` once the attempt budget is
+/// exhausted (the caller then falls back to other pool members / discovery).
+async fn reconnect_sticky_peer(
+    engine: &mut DiscoveryEngine<'_>,
+    server: &Server,
+    peer: PeerId,
+    shutdown: &tokio_util::sync::CancellationToken,
+) -> Result<Option<PeerId>> {
+    const MAX_ATTEMPTS: usize = 3;
+    const MAX_BACKOFF: Duration = Duration::from_secs(8);
+    // Cap total wall-clock: a truly-gone peer must rotate before client-side
+    // timeouts fire, and this call holds the shared proxy-event handler.
+    const OVERALL_DEADLINE: Duration = Duration::from_secs(30);
+
+    let deadline = tokio::time::Instant::now() + OVERALL_DEADLINE;
+    let mut backoff = Duration::from_secs(1);
+    for attempt in 1..=MAX_ATTEMPTS {
+        if shutdown.is_cancelled() {
+            bail!("Shutdown requested while reconnecting to sticky exit peer");
+        }
+        if let Some(reached) = try_reach_peer(engine, server, peer, shutdown).await? {
+            counter!("p2proxy_sticky_reconnect_success_total", "port" => server.port.to_string())
+                .increment(1);
+            info!(%peer, attempt, port = server.port, "reconnected to sticky exit peer");
+            return Ok(Some(reached));
+        }
+        warn!(
+            %peer,
+            attempt,
+            max = MAX_ATTEMPTS,
+            port = server.port,
+            "sticky reconnect attempt failed"
+        );
+        if attempt == MAX_ATTEMPTS || tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        // Back off, but keep draining the swarm — a bare sleep here would
+        // freeze the whole network task (this call owns the only &mut Swarm),
+        // stalling the transport and every other server's events.
+        let wake = (tokio::time::Instant::now() + backoff).min(deadline);
+        let sleep = tokio::time::sleep_until(wake);
+        tokio::pin!(sleep);
+        loop {
+            tokio::select! {
+                _ = &mut sleep => break,
+                _ = shutdown.cancelled() => {
+                    bail!("Shutdown requested during sticky reconnect backoff")
+                }
+                _ = engine.swarm.next() => {}
+            }
+        }
+        backoff = (backoff * 2).min(MAX_BACKOFF);
+    }
+    counter!("p2proxy_sticky_reconnect_exhausted_total", "port" => server.port.to_string())
+        .increment(1);
+    info!(
+        %peer,
+        port = server.port,
+        "sticky exit peer unreachable after retries — falling back to pool/discovery"
+    );
+    Ok(None)
+}
+
+/// Auto-heal from the remembered pool: try each known-good exit in
+/// most-recently-used order (one [`try_reach_peer`] pass each), adopting the
+/// first that connects and pruning members that are gone. `skip` is the peer
+/// that just dropped — the hub usually hasn't noticed yet. Used on startup,
+/// for fail-fast rotation, and after a with-backoff exhaustion.
+async fn connect_sticky_pool(
+    engine: &mut DiscoveryEngine<'_>,
+    server: &Server,
+    fingerprint: &str,
+    shutdown: &tokio_util::sync::CancellationToken,
+    skip: Option<PeerId>,
+) -> Result<Option<PeerId>> {
+    if !server.peer_options.sticky {
+        return Ok(None);
+    }
+    // Bound total time spent probing the pool so a run of dead members can't
+    // hold the shared handler indefinitely before discovery takes over.
+    const OVERALL_DEADLINE: Duration = Duration::from_secs(30);
+    let deadline = tokio::time::Instant::now() + OVERALL_DEADLINE;
+    for peer in engine.sticky.pool(server.port, fingerprint) {
+        if Some(peer) == skip {
+            continue;
+        }
+        if shutdown.is_cancelled() {
+            bail!("Shutdown requested while reconnecting to sticky pool");
+        }
+        if tokio::time::Instant::now() >= deadline {
+            debug!(
+                port = server.port,
+                "sticky pool probe deadline reached — falling back to discovery"
+            );
+            break;
+        }
+        if let Some(reached) = try_reach_peer(engine, server, peer, shutdown).await? {
+            counter!("p2proxy_sticky_pool_hits_total", "port" => server.port.to_string())
+                .increment(1);
+            info!(%peer, port = server.port, "reconnected to sticky pool member");
+            return Ok(Some(reached));
+        }
+        engine.sticky.forget_peer(server.port, peer);
+    }
+    Ok(None)
+}
+
+/// Add a freshly-adopted exit to the head of the server's sticky pool so the
+/// next restart/reconnect re-uses it (and the pool auto-heals/grows). The
+/// hint line is the graduation path from learned affinity to an explicit
+/// pin: copy the id into `destination_peers` and the exit survives even a
+/// deleted `sticky_peers.json`.
+fn remember_pool_peer(
+    engine: &mut DiscoveryEngine<'_>,
+    server: &Server,
+    fingerprint: &str,
+    peer: PeerId,
+) {
     if !server.peer_options.sticky {
         return;
     }
-    let fingerprint = server.peer_options.filter_fingerprint(server.port);
-    match engine.sticky.remember(server.port, &fingerprint, peer) {
+    // One knob: the stream pool's max_total also bounds the sticky pool.
+    let max = server.pool.max_total;
+    match engine.sticky.remember(server.port, fingerprint, peer, max) {
         Ok(true) => info!(
             %peer,
             port = server.port,
@@ -308,19 +442,51 @@ fn emit_pinned_statuses(
     });
 }
 
-/// Discover candidates for `server` and connect to one, retrying with the
-/// same filters until a peer is adopted. The sticky pre-pass runs first so
-/// restarts/reconnects keep the same exit IP whenever the remembered peer is
-/// still reachable. In TUI mode an exhausted cycle surfaces an
-/// `Events::Error` and starts over after a backoff; headless mode bails so
-/// the failure is visible in logs/exit code.
+/// Connect a discovery-driven `server` to an exit peer. The sticky pool runs
+/// first so restarts/reconnects keep a stable exit IP:
+///   1. If the active peer just dropped (`avoid`) and the server is in
+///      `with-backoff` mode, fight to reconnect to that SAME peer before
+///      rotating — a transient circuit cycle shouldn't change the egress IP.
+///   2. Otherwise (startup, `fail-fast` rotation, or a with-backoff
+///      exhaustion) auto-heal from the remembered pool, trying known-good
+///      members in most-recently-used order.
+///   3. Only then fall back to fresh attribute-filtered discovery.
+///
+/// In TUI mode an exhausted discovery cycle surfaces an `Events::Error` and
+/// starts over after a backoff; headless mode bails so the failure is visible
+/// in logs/exit code.
 async fn connect_discovered(
     mut engine: DiscoveryEngine<'_>,
     server: &Server,
     shutdown: &tokio_util::sync::CancellationToken,
     avoid: Option<PeerId>,
 ) -> Result<ConnectedDestination, color_eyre::eyre::Error> {
-    if let Some(peer) = try_sticky_peer(&mut engine, server, shutdown, avoid).await? {
+    let fingerprint = server.peer_options.filter_fingerprint(server.port);
+
+    // 1. A dropped active sticky peer is worth fighting for in with-backoff
+    //    mode — hold the egress IP rather than rotating on a transient drop.
+    if let Some(old) = avoid
+        && server.peer_options.sticky
+        && server.peer_options.sticky_reconnect == StickyReconnect::WithBackoff
+    {
+        match reconnect_sticky_peer(&mut engine, server, old, shutdown).await? {
+            Some(peer) => {
+                remember_pool_peer(&mut engine, server, &fingerprint, peer);
+                return Ok(ConnectedDestination {
+                    peer,
+                    source: DestinationSource::Sticky,
+                });
+            }
+            None => engine.sticky.forget_peer(server.port, old),
+        }
+    }
+
+    // 2. Auto-heal from the remembered pool (skipping the peer that just
+    //    dropped — the hub usually hasn't noticed the drop yet).
+    if let Some(peer) =
+        connect_sticky_pool(&mut engine, server, &fingerprint, shutdown, avoid).await?
+    {
+        remember_pool_peer(&mut engine, server, &fingerprint, peer);
         return Ok(ConnectedDestination {
             peer,
             source: DestinationSource::Sticky,
@@ -350,7 +516,7 @@ async fn connect_discovered(
             // so Ctrl+C during the 5s wait_for_with_timeout doesn't have to
             // wait it out.
             let discovery = tokio::select! {
-                r = resolve::discover_peer(&mut engine, server) => r,
+                r = resolve::discover_peer(&mut engine, server, FINDNODES_DISCOVERY_LIMIT) => r,
                 _ = shutdown.cancelled() => {
                     bail!("Shutdown requested during peer discovery");
                 }
@@ -385,7 +551,11 @@ async fn connect_discovered(
 
             match dial_and_wait(&mut engine, &destination_addresses, shutdown).await? {
                 Some(peer_id) => {
-                    remember_sticky_choice(&mut engine, server, peer_id);
+                    remember_pool_peer(&mut engine, server, &fingerprint, peer_id);
+                    // The rest of the pool fills from the live connections the
+                    // swarm promotes as the other dialed candidates hole-punch
+                    // (each carrying its real direct address) — see
+                    // StickyStore::promote_connected.
                     return Ok(ConnectedDestination {
                         peer: peer_id,
                         source: DestinationSource::Discovered,
@@ -430,17 +600,7 @@ async fn connect_discovered(
 /// the last one (the actual node behind the circuit). For a direct address
 /// (no `/p2p-circuit/`) the last P2p IS the destination.
 fn destination_peer_ids(addresses: &HashSet<libp2p::Multiaddr>) -> HashSet<PeerId> {
-    addresses
-        .iter()
-        .filter_map(|addr| {
-            addr.iter()
-                .filter_map(|p| match p {
-                    Protocol::P2p(pid) => Some(pid),
-                    _ => None,
-                })
-                .last()
-        })
-        .collect()
+    addresses.iter().filter_map(last_p2p).collect()
 }
 
 /// Dial every candidate address and wait (10s) for the first
@@ -603,5 +763,29 @@ mod tests {
         let ids = destination_peer_ids(&HashSet::from([circuit, direct]));
         assert_eq!(ids, HashSet::from([dest, direct_dest]));
         assert!(!ids.contains(&relay), "relay must never enter the dial set");
+    }
+
+    /// The direct-address fast path stores a BARE transport multiaddr (the
+    /// observed socket addr, no `/p2p/`). dial_and_wait scopes its accept
+    /// predicate to `destination_peer_ids`, so the address must be tagged
+    /// with the peer id before dialing or nothing will ever match.
+    #[test]
+    fn bare_direct_address_must_be_tagged_with_peer_id() {
+        let peer = random_peer();
+        let bare: libp2p::Multiaddr = "/ip4/203.0.113.7/udp/45445/quic-v1"
+            .parse()
+            .expect("bare addr");
+
+        assert!(
+            destination_peer_ids(&HashSet::from([bare.clone()])).is_empty(),
+            "a bare address yields no dial target — would never adopt"
+        );
+
+        let tagged = bare.with_p2p(peer).expect("append /p2p/");
+        assert_eq!(
+            destination_peer_ids(&HashSet::from([tagged])),
+            HashSet::from([peer]),
+            "tagging with the peer id makes the stored direct address dialable"
+        );
     }
 }

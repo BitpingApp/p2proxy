@@ -12,7 +12,7 @@
 mod common;
 use common::fixtures::{generate_test_data, test_server_with_bandwidth};
 use common::mock_peer::{MockPeer, MockPeerConfig};
-use common::test_utils::{assert_bandwidth_within, BandwidthMeasurement};
+use common::test_utils::{BandwidthMeasurement, assert_bandwidth_within};
 use models::config::ProxyProtocols;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -160,12 +160,12 @@ async fn test_min_bandwidth_config() {
     // Create mock peers with different bandwidth capabilities
     let peer_configs = vec![
         MockPeerConfig {
-            bandwidth: 10_000_000,   // 10 Mbps
+            bandwidth: 10_000_000, // 10 Mbps
             latency: Duration::from_millis(50),
             ..Default::default()
         },
         MockPeerConfig {
-            bandwidth: 100_000_000,  // 100 Mbps
+            bandwidth: 100_000_000, // 100 Mbps
             latency: Duration::from_millis(20),
             ..Default::default()
         },
@@ -229,8 +229,15 @@ mod additional_tests {
     #[test]
     fn test_bandwidth_measurement_edge_case() {
         let measurement = BandwidthMeasurement::new(1000, Duration::from_secs(0));
-        assert_eq!(measurement.bytes_per_sec, 0.0, "Should handle zero duration");
-        assert_eq!(measurement.mbps(), 0.0, "Mbps should be 0 for zero duration");
+        assert_eq!(
+            measurement.bytes_per_sec, 0.0,
+            "Should handle zero duration"
+        );
+        assert_eq!(
+            measurement.mbps(),
+            0.0,
+            "Mbps should be 0 for zero duration"
+        );
     }
 
     /// Test bandwidth assertion within tolerance

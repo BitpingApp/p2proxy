@@ -27,8 +27,8 @@
 //! ```
 
 use libp2p::{Multiaddr, PeerId};
-use rand::{Rng, SeedableRng};
 use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
@@ -89,17 +89,17 @@ impl Default for MockPeerConfig {
 pub enum QueryType {
     /// Find specific node
     FindNode(PeerId),
-    
+
     /// Find nodes matching criteria
     FindNodes {
         country: Option<String>,
         min_bandwidth: Option<u64>,
         limit: usize,
     },
-    
+
     /// Ping request
     Ping,
-    
+
     /// Custom query
     Custom(Vec<u8>),
 }
@@ -114,16 +114,16 @@ pub enum QueryResponse {
         bandwidth: u64,
         country: Option<String>,
     },
-    
+
     /// List of peers
     Peers(Vec<PeerId>),
-    
+
     /// Pong response
     Pong,
-    
+
     /// Error response
     Error(String),
-    
+
     /// Custom response
     Custom(Vec<u8>),
 }
@@ -133,16 +133,16 @@ pub enum QueryResponse {
 pub struct PeerStats {
     /// Total bytes sent
     pub bytes_sent: u64,
-    
+
     /// Total bytes received
     pub bytes_received: u64,
-    
+
     /// Number of queries received
     pub queries_received: u64,
-    
+
     /// Number of connections handled
     pub connections_handled: u64,
-    
+
     /// Number of failures
     pub failures: u64,
 }
@@ -151,22 +151,22 @@ pub struct PeerStats {
 pub struct MockPeer {
     /// Peer ID
     peer_id: PeerId,
-    
+
     /// Configuration
     config: MockPeerConfig,
-    
+
     /// Current connections
     active_connections: HashMap<PeerId, Instant>,
-    
+
     /// Random number generator
     rng: StdRng,
-    
+
     /// Listening addresses
     addresses: Vec<Multiaddr>,
-    
+
     /// Statistics
     stats: PeerStats,
-    
+
     /// Bandwidth tracking
     bytes_transferred_this_second: u64,
     last_bandwidth_check: Instant,
@@ -190,8 +190,12 @@ impl MockPeer {
 
         let peer_id = PeerId::random();
         let addresses = vec![
-            format!("/ip4/192.168.1.100/tcp/4001/p2p/{}", peer_id).parse().unwrap(),
-            format!("/ip4/192.168.1.100/udp/4001/quic-v1/p2p/{}", peer_id).parse().unwrap(),
+            format!("/ip4/192.168.1.100/tcp/4001/p2p/{}", peer_id)
+                .parse()
+                .unwrap(),
+            format!("/ip4/192.168.1.100/udp/4001/quic-v1/p2p/{}", peer_id)
+                .parse()
+                .unwrap(),
         ];
 
         Self {
@@ -211,8 +215,12 @@ impl MockPeer {
         let mut peer = Self::new(config);
         peer.peer_id = peer_id;
         peer.addresses = vec![
-            format!("/ip4/192.168.1.100/tcp/4001/p2p/{}", peer_id).parse().unwrap(),
-            format!("/ip4/192.168.1.100/udp/4001/quic-v1/p2p/{}", peer_id).parse().unwrap(),
+            format!("/ip4/192.168.1.100/tcp/4001/p2p/{}", peer_id)
+                .parse()
+                .unwrap(),
+            format!("/ip4/192.168.1.100/udp/4001/quic-v1/p2p/{}", peer_id)
+                .parse()
+                .unwrap(),
         ];
         peer
     }
@@ -259,7 +267,10 @@ impl MockPeer {
         }
 
         // Simulate network latency with jitter
-        let jitter = Duration::from_millis(self.rng.random_range(0..self.config.jitter.as_millis() as u64));
+        let jitter = Duration::from_millis(
+            self.rng
+                .random_range(0..self.config.jitter.as_millis() as u64),
+        );
         sleep(self.config.latency + jitter).await;
 
         // Track query
@@ -377,9 +388,10 @@ impl MockPeer {
 
     /// Close a connection with another peer
     pub async fn close_connection(&mut self, peer: PeerId) -> Result<(), String> {
-        self.active_connections.remove(&peer)
+        self.active_connections
+            .remove(&peer)
             .ok_or_else(|| "Connection not found".to_string())?;
-        
+
         Ok(())
     }
 
@@ -439,7 +451,8 @@ impl MockPeer {
         if self.bytes_transferred_this_second > max_bytes {
             // Calculate how long to sleep to stay within bandwidth limit
             let excess_bytes = self.bytes_transferred_this_second - max_bytes;
-            let sleep_duration = Duration::from_secs_f64(excess_bytes as f64 / self.config.bandwidth as f64);
+            let sleep_duration =
+                Duration::from_secs_f64(excess_bytes as f64 / self.config.bandwidth as f64);
             sleep(sleep_duration).await;
         }
 
@@ -536,7 +549,8 @@ mod tests {
 
         // Simulate brief network issue (reduced for test speed)
         tokio::spawn(async move {
-            peer.simulate_network_issue(Duration::from_millis(100)).await;
+            peer.simulate_network_issue(Duration::from_millis(100))
+                .await;
         });
 
         // Give it a moment to go offline
@@ -567,7 +581,7 @@ mod tests {
 
         // Change bandwidth
         peer.set_bandwidth(50_000_000);
-        
+
         let response = peer.respond_to_query(b"peer_info").await.unwrap();
         if let QueryResponse::PeerInfo { bandwidth, .. } = response {
             assert_eq!(bandwidth, 50_000_000);

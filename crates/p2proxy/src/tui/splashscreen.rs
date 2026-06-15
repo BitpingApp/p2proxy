@@ -1,12 +1,12 @@
 use std::{io::Stdout, time::Duration};
 
 use ratatui::{
+    Frame, Terminal,
     layout::{Constraint, Direction, Layout},
     prelude::CrosstermBackend,
     style::{Color, Style, Stylize},
     text::{Line, Span},
     widgets::{Block, Paragraph},
-    Frame, Terminal,
 };
 use tokio::time::interval;
 use tui_components::theme;
@@ -58,7 +58,11 @@ fn draw_loading(frame: &mut Frame<'_>, frame_no: usize) {
         let dots = ".".repeat(((frame_no / 12) % 3) + 1);
         let layout = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(0), Constraint::Length(1), Constraint::Min(0)])
+            .constraints([
+                Constraint::Min(0),
+                Constraint::Length(1),
+                Constraint::Min(0),
+            ])
             .split(area);
         let line = Line::from(Span::styled(
             format!("p2proxy v{VERSION}  loading{dots}"),

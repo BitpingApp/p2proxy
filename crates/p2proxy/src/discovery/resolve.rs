@@ -6,10 +6,10 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use bitping_swarm::auth::Auth;
-use bitping_swarm::query::{QueryRequest, QueryResponse, MAX_RESOLVE_PEERS};
-use color_eyre::eyre::{eyre, Result};
+use bitping_swarm::query::{MAX_RESOLVE_PEERS, QueryRequest, QueryResponse};
+use color_eyre::eyre::{Result, eyre};
 use futures::StreamExt;
-use libp2p::{multiaddr::Protocol, Multiaddr, PeerId};
+use libp2p::{Multiaddr, PeerId, multiaddr::Protocol};
 use metrics::counter;
 use models::config::Server;
 use models::events::Events;
@@ -111,7 +111,7 @@ pub(crate) async fn resolve_pinned_routes(
         QueryResponse::FindNode(_) => {
             return Err(ResolveError::Unsupported(
                 "expected FindNodes response, got FindNode".to_string(),
-            ))
+            ));
         }
     };
 
@@ -140,12 +140,16 @@ fn note_resolve_unsupported(engine: &mut DiscoveryEngine<'_>, reason: &str) {
 }
 
 /// Discover dial addresses for a server via a hub `FindNodes` query
-/// filtered by the server's country / min_bandwidth. Pinned servers never
-/// reach this — `connect` routes them through `resolve_pinned_routes`.
+/// filtered by the server's country / min_bandwidth. `limit` bounds how many
+/// candidates the hub returns — a fresh discovery asks for several to dial in
+/// parallel, while a pool top-up asks for only roughly what it needs. Pinned
+/// servers never reach this — `connect` routes them through
+/// `resolve_pinned_routes`.
 #[instrument(skip(engine))]
 pub(crate) async fn discover_peer(
     engine: &mut DiscoveryEngine<'_>,
     server: &Server,
+    limit: usize,
 ) -> Result<HashSet<Multiaddr>, color_eyre::eyre::Error> {
     let destination_address = {
         let mut node_reqs = Requirements::default();
@@ -178,7 +182,7 @@ pub(crate) async fn discover_peer(
                 requirements: Some(node_reqs),
                 exclusions: Some(node_excs),
                 capabilities: None,
-                limit: 25,
+                limit: limit.min(u16::MAX as usize) as u16,
             },
             &KEYPAIR,
             engine.token.to_string(),
@@ -193,7 +197,7 @@ pub(crate) async fn discover_peer(
             QueryResponse::FindNode(_) => {
                 return Err(eyre!(
                     "Got wrong query response, expected FindNodes, got: FindNode"
-                ))
+                ));
             }
             QueryResponse::FindNodes(hash_set) => hash_set,
         };
@@ -220,10 +224,17 @@ pub(crate) async fn discover_peer(
 
         // Surface the pool to the TUI's NETWORK tab so the operator
         // can see who's available for each server, not just the one
-        // we picked. Replace-not-merge — peers that fell out of the
-        // filter shouldn't linger in the rendered list.
-        let pool_peers: Vec<libp2p::PeerId> =
-            discovered.iter().map(|p| p.peer_id).collect();
+        // we picked. Carry each candidate's hub-resolved dial routes so
+        // the rotation pool can show where a peer is reachable.
+        // Replace-not-merge — peers that fell out of the filter
+        // shouldn't linger in the rendered list.
+        let pool_peers: Vec<models::events::PoolPeer> = discovered
+            .iter()
+            .map(|p| models::events::PoolPeer {
+                peer_id: p.peer_id,
+                addresses: p.addresses.clone(),
+            })
+            .collect();
         metrics::gauge!("p2proxy_server_pool_size", "port" => server.port.to_string())
             .set(pool_peers.len() as f64);
         let _ = engine

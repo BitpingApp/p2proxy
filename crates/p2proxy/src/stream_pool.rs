@@ -1,8 +1,8 @@
-use p2p_bandwidth_protocol::TCP_PROXY_PROTOCOL;
-use color_eyre::eyre::{eyre, Result};
-use libp2p::{identity::Keypair, PeerId, Stream, StreamProtocol};
+use color_eyre::eyre::{Result, eyre};
+use libp2p::{PeerId, Stream, StreamProtocol, identity::Keypair};
 use libp2p_stream as stream;
 use libp2p_stream::OpenStreamError;
+use p2p_bandwidth_protocol::TCP_PROXY_PROTOCOL;
 
 /// Typed errors from `StreamPool::acquire_stream`. Modelled as an enum
 /// (rather than an `eyre::Report`) so call sites can pattern-match on
@@ -95,7 +95,7 @@ pub struct PoolConfig {
 impl Default for PoolConfig {
     fn default() -> Self {
         Self {
-            max_concurrent_per_peer: 30,
+            max_concurrent_per_peer: 5,
             stream_open_timeout: Duration::from_secs(20),
             enabled: true,
             max_retries: 3,
@@ -178,10 +178,7 @@ pub struct StreamPool {
 
 impl StreamPool {
     /// Create a new stream manager
-    pub fn new(
-        control: stream::Control,
-        config: PoolConfig,
-    ) -> Arc<Self> {
+    pub fn new(control: stream::Control, config: PoolConfig) -> Arc<Self> {
         let pool = Arc::new(Self {
             peers: Arc::new(RwLock::new(HashMap::new())),
             control,
@@ -199,7 +196,10 @@ impl StreamPool {
 
     /// Open a stream to the given peer with rate limiting and timeout
     #[instrument(skip(self), fields(peer = %peer))]
-    pub async fn acquire_stream(&self, peer: PeerId) -> std::result::Result<Stream, StreamPoolError> {
+    pub async fn acquire_stream(
+        &self,
+        peer: PeerId,
+    ) -> std::result::Result<Stream, StreamPoolError> {
         if !self.config.enabled {
             // Management disabled, open stream directly
             let mut control = self.control.clone();
@@ -284,7 +284,8 @@ impl StreamPool {
                 peer_conn.stats.is_healthy = true;
             }
 
-            counter!("p2proxy_stream_opened_success_total", "peer" => peer.to_string()).increment(1);
+            counter!("p2proxy_stream_opened_success_total", "peer" => peer.to_string())
+                .increment(1);
             gauge!("p2proxy_peer_error_rate", "peer" => peer.to_string()).set(error_rate);
         }
     }
@@ -339,13 +340,15 @@ impl StreamPool {
                 let error_rate = peer_conn.error_rate();
                 if error_rate >= max_error_rate {
                     peer_conn.stats.is_healthy = false;
-                    counter!("p2proxy_peer_failover_total", "peer" => peer.to_string()).increment(1);
+                    counter!("p2proxy_peer_failover_total", "peer" => peer.to_string())
+                        .increment(1);
                 }
 
                 gauge!("p2proxy_stream_pool_active_total", "peer" => peer.to_string())
                     .set(peer_conn.stats.current_active as f64);
                 gauge!("p2proxy_peer_error_rate", "peer" => peer.to_string()).set(error_rate);
-                counter!("p2proxy_stream_opened_failed_total", "peer" => peer.to_string()).increment(1);
+                counter!("p2proxy_stream_opened_failed_total", "peer" => peer.to_string())
+                    .increment(1);
             }
         });
     }
@@ -399,9 +402,6 @@ impl StreamPool {
     /// Get error rate for a peer
     pub async fn get_peer_error_rate(&self, peer: &PeerId) -> f64 {
         let peers = self.peers.read().await;
-        peers
-            .get(peer)
-            .map(|conn| conn.error_rate())
-            .unwrap_or(0.0)
+        peers.get(peer).map(|conn| conn.error_rate()).unwrap_or(0.0)
     }
 }

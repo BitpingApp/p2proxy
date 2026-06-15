@@ -8,8 +8,6 @@
 # reduces relay reliance.
 port: 45445
 
-bootstrap: "/ip4/127.0.0.1/tcp/31515"
-
 # Logging verbosity: trace | debug | info | warn | error
 log_level: info
 

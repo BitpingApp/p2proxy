@@ -8,7 +8,7 @@
 //! - Creating mock SOCKS5 connections
 //! - Various assertion helpers
 
-use color_eyre::eyre::{eyre, Result};
+use color_eyre::eyre::{Result, eyre};
 use models::events::Events;
 use socks5_impl::protocol::Address;
 use std::future::Future;
@@ -304,10 +304,7 @@ pub fn assert_bandwidth_within(actual: u64, expected: u64, tolerance_pct: f64) {
 ///     ).await.unwrap();
 /// }
 /// ```
-pub async fn wait_for_event<P>(
-    predicate: P,
-    timeout_duration: Duration,
-) -> Result<Events>
+pub async fn wait_for_event<P>(predicate: P, timeout_duration: Duration) -> Result<Events>
 where
     P: Fn(&Events) -> bool,
 {
@@ -421,7 +418,10 @@ where
     let mean = sum / iterations as u32;
 
     let median_idx = iterations / 2;
-    let median = measurements.get(median_idx).copied().unwrap_or(Duration::ZERO);
+    let median = measurements
+        .get(median_idx)
+        .copied()
+        .unwrap_or(Duration::ZERO);
 
     let p95_idx = (iterations as f64 * 0.95) as usize;
     let p95 = measurements.get(p95_idx).copied().unwrap_or(max);

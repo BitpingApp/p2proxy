@@ -18,14 +18,14 @@
 //!
 //! All tests run in <2 minutes and are suitable for CI/CD environments.
 
+use rand::Rng;
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
-use rand::Rng;
 
 // Import common test utilities
 mod common;
-use common::{MockSwarm, MockSwarmConfig, MockSwarmEvent};
 use common::mock_swarm::MockConnectionError;
+use common::{MockSwarm, MockSwarmConfig, MockSwarmEvent};
 
 // ============================================================================
 // RECONNECTION LOGIC TESTS
@@ -175,10 +175,7 @@ async fn test_session_restoration() {
             reconnection_established = true;
         }
     }
-    assert!(
-        reconnection_established,
-        "Reconnection not established"
-    );
+    assert!(reconnection_established, "Reconnection not established");
     assert!(swarm.is_connected(&peer_id));
     println!("✓ Session restored successfully");
 }
@@ -275,7 +272,10 @@ async fn test_connection_churn() {
     const ITERATIONS: usize = 150;
     let start = Instant::now();
 
-    println!("Starting connection churn test with {} iterations...", ITERATIONS);
+    println!(
+        "Starting connection churn test with {} iterations...",
+        ITERATIONS
+    );
 
     for i in 0..ITERATIONS {
         // Connect
@@ -466,7 +466,10 @@ async fn test_resource_exhaustion_handling() {
         MAX_CONNECTIONS,
         "Did not reach expected connection limit"
     );
-    println!("✓ Reached connection limit: {} connections", MAX_CONNECTIONS);
+    println!(
+        "✓ Reached connection limit: {} connections",
+        MAX_CONNECTIONS
+    );
 
     // Step 2: Attempt to exceed the limit
     println!("Step 2: Testing graceful degradation beyond limit...");
@@ -513,7 +516,10 @@ async fn test_resource_exhaustion_handling() {
         remaining,
         "Incorrect number of connections after cleanup"
     );
-    println!("✓ Freed {} connections, {} remaining", peers_to_disconnect, remaining);
+    println!(
+        "✓ Freed {} connections, {} remaining",
+        peers_to_disconnect, remaining
+    );
 
     // Step 4: Verify we can accept new connections again
     println!("Step 4: Verifying recovery...");

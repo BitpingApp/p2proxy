@@ -10,8 +10,8 @@
 use human_bandwidth::re::bandwidth::Bandwidth;
 use libp2p::identity::Keypair;
 use models::config::{Config, PoolConfigOptions, ProxyProtocols, Server, ServerPeerOptions};
-use rand::rngs::StdRng;
 use rand::SeedableRng;
+use rand::rngs::StdRng;
 use std::borrow::Cow;
 use std::ops::Range;
 
@@ -61,7 +61,9 @@ pub fn test_config(servers: Vec<Server>) -> Config {
         servers,
         port: 45445,
         bitping_api_key: Cow::Borrowed("test_api_key"),
-        bootstrap: "/dnsaddr/boot2.bitping.com".parse().expect("valid multiaddr"),
+        bootstrap: "/dnsaddr/boot2.bitping.com"
+            .parse()
+            .expect("valid multiaddr"),
     }
 }
 
@@ -98,6 +100,7 @@ pub fn test_server(port: u16, protocol: ProxyProtocols) -> Server {
             destination_peers: None,
             fallback_to_discovery: false,
             sticky: true,
+            sticky_reconnect: models::config::StickyReconnect::default(),
             country: None,
             min_bandwidth: Bandwidth::from_mbps(50),
         },
@@ -130,6 +133,7 @@ pub fn test_server_with_country(port: u16, protocol: ProxyProtocols, country: &s
             destination_peers: None,
             fallback_to_discovery: false,
             sticky: true,
+            sticky_reconnect: models::config::StickyReconnect::default(),
             country: Some(country.to_string()),
             min_bandwidth: Bandwidth::from_mbps(50),
         },
@@ -153,7 +157,11 @@ pub fn test_server_with_country(port: u16, protocol: ProxyProtocols, country: &s
 ///
 /// let server = test_server_with_bandwidth(1080, ProxyProtocols::Socks5, 100);
 /// ```
-pub fn test_server_with_bandwidth(port: u16, protocol: ProxyProtocols, min_bandwidth_mbps: u64) -> Server {
+pub fn test_server_with_bandwidth(
+    port: u16,
+    protocol: ProxyProtocols,
+    min_bandwidth_mbps: u64,
+) -> Server {
     Server {
         protocol,
         port,
@@ -161,6 +169,7 @@ pub fn test_server_with_bandwidth(port: u16, protocol: ProxyProtocols, min_bandw
             destination_peers: None,
             fallback_to_discovery: false,
             sticky: true,
+            sticky_reconnect: models::config::StickyReconnect::default(),
             country: None,
             min_bandwidth: Bandwidth::from_mbps(min_bandwidth_mbps),
         },
@@ -207,8 +216,7 @@ pub fn test_keypair(seed: u64) -> Keypair {
     rng.fill_bytes(&mut secret_bytes);
 
     // Create keypair from the deterministic bytes
-    Keypair::ed25519_from_bytes(secret_bytes)
-        .expect("Failed to create Ed25519 keypair from bytes")
+    Keypair::ed25519_from_bytes(secret_bytes).expect("Failed to create Ed25519 keypair from bytes")
 }
 
 /// Generates test data with a known size and blake3 hash
@@ -368,5 +376,4 @@ mod tests {
         assert_ne!(data1, data2);
         assert_ne!(hash1, hash2);
     }
-
 }

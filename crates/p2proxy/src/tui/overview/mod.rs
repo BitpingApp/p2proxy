@@ -8,8 +8,8 @@ use ratatui::{
 use tracing::debug;
 
 use super::{
+    ACCENT, BACKGROUND, BORDER, ERROR, FOREGROUND, PRIMARY, SECONDARY, SUCCESS, Ui, WARN,
     ui_state::{ConnectionStatus, UIState},
-    Ui, ACCENT, BACKGROUND, BORDER, ERROR, FOREGROUND, PRIMARY, SECONDARY, SUCCESS, WARN,
 };
 
 impl Ui {
@@ -320,10 +320,7 @@ impl Ui {
                     .bounds([0.0, y_max])
                     .labels(vec![
                         Span::styled("0", Style::default().fg(ACCENT)),
-                        Span::styled(
-                            format!("{:.1}", y_max / 2.0),
-                            Style::default().fg(ACCENT),
-                        ),
+                        Span::styled(format!("{:.1}", y_max / 2.0), Style::default().fg(ACCENT)),
                         Span::styled(format!("{:.1}", y_max), Style::default().fg(ACCENT)),
                     ]),
             );

@@ -1,18 +1,18 @@
 // socks_stream.rs
-use p2p_bandwidth_protocol::{
-    bandwidth_reporter::BandwidthReport, DataPhaseMessage, ProxySession, TargetAddr,
-    TCP_PROXY_PROTOCOL,
-};
-use color_eyre::eyre::{eyre, Result};
-use futures::{AsyncReadExt, AsyncWriteExt, FutureExt, Stream};
-use std::time::Duration;
-use libp2p::{core::SignedEnvelope, identity::Keypair, PeerId, Stream as LibP2pStream};
-use libp2p_stream as p2p_stream;
 use crate::stream_pool::{PoolConfig, StreamPool};
+use color_eyre::eyre::{Result, eyre};
+use futures::{AsyncReadExt, AsyncWriteExt, FutureExt, Stream};
+use libp2p::{PeerId, Stream as LibP2pStream, core::SignedEnvelope, identity::Keypair};
+use libp2p_stream as p2p_stream;
 use metrics::{counter, gauge, histogram};
-use socks5_impl::protocol::{
-    handshake, Address, AsyncStreamOperation, AuthMethod, Reply, Request, Response,
+use p2p_bandwidth_protocol::{
+    DataPhaseMessage, ProxySession, TCP_PROXY_PROTOCOL, TargetAddr,
+    bandwidth_reporter::BandwidthReport,
 };
+use socks5_impl::protocol::{
+    Address, AsyncStreamOperation, AuthMethod, Reply, Request, Response, handshake,
+};
+use std::time::Duration;
 use std::{
     io,
     net::SocketAddr,
@@ -83,9 +83,7 @@ pub enum SocksStreamMessage {
     /// peers match the filters) proceeds in the background on the swarm
     /// task — otherwise the first server's hung retry loop blocks every
     /// subsequent server from ever binding its port.
-    DiscoverPeerForServer {
-        server_config: &'static Server,
-    },
+    DiscoverPeerForServer { server_config: &'static Server },
 }
 
 #[derive(Debug, Clone)]
@@ -161,11 +159,8 @@ pub async fn create_socks_proxy_stream(
                     // tokio's `TcpListener::bind` on macOS by default,
                     // so a port in TIME_WAIT will reject — back off
                     // and retry.
-                    match TcpListener::bind(SocketAddr::from((
-                        [0, 0, 0, 0],
-                        server_config.port,
-                    )))
-                    .await
+                    match TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], server_config.port)))
+                        .await
                     {
                         Ok(l) => {
                             counter!(
@@ -173,11 +168,18 @@ pub async fn create_socks_proxy_stream(
                                 "port" => server_config.port.to_string()
                             )
                             .increment(1);
-                            info!(port = server_config.port, "SOCKS5 listener re-bound after crash");
+                            info!(
+                                port = server_config.port,
+                                "SOCKS5 listener re-bound after crash"
+                            );
                             l
                         }
                         Err(e) => {
-                            error!(port = server_config.port, ?e, "Failed to re-bind, retrying in 5s");
+                            error!(
+                                port = server_config.port,
+                                ?e,
+                                "Failed to re-bind, retrying in 5s"
+                            );
                             tokio::time::sleep(Duration::from_secs(5)).await;
                             continue;
                         }
@@ -199,7 +201,10 @@ pub async fn create_socks_proxy_stream(
             );
             match std::panic::AssertUnwindSafe(inner).catch_unwind().await {
                 Ok(Ok(())) => {
-                    info!(port = server_config.port, "accept loop returned cleanly — exiting supervisor");
+                    info!(
+                        port = server_config.port,
+                        "accept loop returned cleanly — exiting supervisor"
+                    );
                     break;
                 }
                 Ok(Err(e)) => {
@@ -208,7 +213,11 @@ pub async fn create_socks_proxy_stream(
                         "port" => server_config.port.to_string()
                     )
                     .increment(1);
-                    error!(port = server_config.port, ?e, "accept loop returned error — re-binding");
+                    error!(
+                        port = server_config.port,
+                        ?e,
+                        "accept loop returned error — re-binding"
+                    );
                 }
                 Err(panic_payload) => {
                     counter!(

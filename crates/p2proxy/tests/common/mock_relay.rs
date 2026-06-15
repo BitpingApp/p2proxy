@@ -24,8 +24,8 @@
 //! ```
 
 use libp2p::{Multiaddr, PeerId};
-use rand::{Rng, SeedableRng};
 use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
@@ -97,10 +97,7 @@ pub enum MockRelayEvent {
     },
 
     /// Reservation denied
-    ReservationDenied {
-        peer_id: PeerId,
-        reason: String,
-    },
+    ReservationDenied { peer_id: PeerId, reason: String },
 
     /// Connection forwarded
     ConnectionForwarded {
@@ -116,9 +113,7 @@ pub enum MockRelayEvent {
     },
 
     /// Reservation expired
-    ReservationExpired {
-        peer_id: PeerId,
-    },
+    ReservationExpired { peer_id: PeerId },
 }
 
 /// Mock implementation of a libp2p relay server
@@ -264,12 +259,15 @@ impl MockRelay {
         }
 
         // Check if destination has a reservation
-        let dest_reservation = self.reservations.get_mut(&destination_peer)
+        let dest_reservation = self
+            .reservations
+            .get_mut(&destination_peer)
             .ok_or_else(|| "Destination peer has no reservation".to_string())?;
 
         // Check connection limits
-        if self.config.enforce_limits 
-            && dest_reservation.active_connections >= self.config.max_connections_per_peer {
+        if self.config.enforce_limits
+            && dest_reservation.active_connections >= self.config.max_connections_per_peer
+        {
             return Err("Destination peer connection limit reached".to_string());
         }
 
@@ -309,7 +307,9 @@ impl MockRelay {
         sleep(self.config.latency).await;
 
         // Find the connection
-        let connection = self.connections.iter_mut()
+        let connection = self
+            .connections
+            .iter_mut()
             .find(|c| c.source_peer == source_peer && c.destination_peer == destination_peer)
             .ok_or_else(|| "Connection not found".to_string())?;
 
@@ -325,7 +325,9 @@ impl MockRelay {
         destination_peer: PeerId,
     ) -> Result<(), String> {
         // Find and remove the connection
-        let pos = self.connections.iter()
+        let pos = self
+            .connections
+            .iter()
             .position(|c| c.source_peer == source_peer && c.destination_peer == destination_peer)
             .ok_or_else(|| "Connection not found".to_string())?;
 
@@ -433,7 +435,7 @@ mod tests {
             ..Default::default()
         };
         let mut relay = MockRelay::new(config);
-        
+
         let source = PeerId::random();
         let dest = PeerId::random();
 

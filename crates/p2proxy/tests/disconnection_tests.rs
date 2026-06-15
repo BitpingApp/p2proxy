@@ -14,9 +14,9 @@ use tokio::time::{sleep, timeout};
 
 // Import common test utilities
 mod common;
-use common::{MockSwarm, MockSwarmConfig, MockSwarmEvent};
 use common::mock_swarm::MockConnectionError;
 use common::{MockPeer, MockPeerConfig, MockRelay, MockRelayConfig};
+use common::{MockSwarm, MockSwarmConfig, MockSwarmEvent};
 use libp2p::PeerId;
 
 // ============================================================================
@@ -174,7 +174,10 @@ async fn test_shutdown_during_active_sessions() {
     // Verify disconnection event received
     let disconnect_event = swarm.poll_event().await;
     assert!(
-        matches!(disconnect_event, Some(MockSwarmEvent::ConnectionClosed { .. })),
+        matches!(
+            disconnect_event,
+            Some(MockSwarmEvent::ConnectionClosed { .. })
+        ),
         "Should receive disconnection event during shutdown"
     );
 
@@ -289,11 +292,7 @@ async fn test_sudden_peer_unavailability() {
 
     // Try to communicate with offline peer
     let start = std::time::Instant::now();
-    let result = timeout(
-        Duration::from_secs(10),
-        peer.respond_to_query(b"ping"),
-    )
-    .await;
+    let result = timeout(Duration::from_secs(10), peer.respond_to_query(b"ping")).await;
 
     // Verify timeout detection happened within limit
     let elapsed = start.elapsed();
@@ -369,7 +368,10 @@ async fn test_network_partition() {
     // Verify error event is emitted
     let error_event = swarm.poll_event().await;
     assert!(
-        matches!(error_event, Some(MockSwarmEvent::OutgoingConnectionError { .. })),
+        matches!(
+            error_event,
+            Some(MockSwarmEvent::OutgoingConnectionError { .. })
+        ),
         "Should emit connection error during partition"
     );
 
@@ -390,7 +392,10 @@ async fn test_network_partition() {
     // Verify connection reestablished
     let reconnect_event = swarm.poll_event().await;
     assert!(
-        matches!(reconnect_event, Some(MockSwarmEvent::ConnectionEstablished { .. })),
+        matches!(
+            reconnect_event,
+            Some(MockSwarmEvent::ConnectionEstablished { .. })
+        ),
         "Should emit ConnectionEstablished after healing"
     );
 }
@@ -490,9 +495,8 @@ async fn test_partial_transfer_failure() {
     let transfer_size = 10 * 1024 * 1024; // 10 MB
 
     // Start async transfer
-    let transfer_handle = tokio::spawn(async move {
-        peer.simulate_data_transfer(transfer_size).await
-    });
+    let transfer_handle =
+        tokio::spawn(async move { peer.simulate_data_transfer(transfer_size).await });
 
     // Simulate disconnect during transfer by waiting a bit then dropping
     sleep(Duration::from_millis(50)).await;

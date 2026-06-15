@@ -96,7 +96,7 @@ impl ServerContainer {
 
     pub async fn handle_event(&mut self, event: events::Events) {
         use events::*;
-        
+
         // Send event to all subscribers first
         let mut failed_senders = Vec::new();
         for (idx, sender) in self.event_senders.iter().enumerate() {
@@ -104,12 +104,12 @@ impl ServerContainer {
                 failed_senders.push(idx);
             }
         }
-        
+
         // Remove failed senders (clients disconnected)
         for idx in failed_senders.into_iter().rev() {
             self.event_senders.remove(idx);
         }
-        
+
         // Update internal state
         match event {
             Events::LocalPeerId(peer_id) => {
@@ -139,8 +139,7 @@ impl ServerContainer {
                         // active-destination state is tracked
                         // separately via `Events::ActiveDestination`.
                         for state in self.servers.values_mut() {
-                            state.peer_connections =
-                                state.peer_connections.saturating_sub(1);
+                            state.peer_connections = state.peer_connections.saturating_sub(1);
                             if state.peer_connections == 0 {
                                 state.connection_status = ConnectionStatus::Disconnected;
                             }
@@ -166,30 +165,30 @@ impl ServerContainer {
                     }
                 }
             }
-            Events::Bandwidth(bandwidth_event) => {
-                match bandwidth_event {
-                    BandwidthEvents::Upload(_session_id, bytes) => {
-                        if let Some(state) = self.servers.values_mut().next() {
-                            state.total_upload += bytes;
-                        }
-                    }
-                    BandwidthEvents::Download(_session_id, bytes) => {
-                        if let Some(state) = self.servers.values_mut().next() {
-                            state.total_download += bytes;
-                        }
+            Events::Bandwidth(bandwidth_event) => match bandwidth_event {
+                BandwidthEvents::Upload(_session_id, bytes) => {
+                    if let Some(state) = self.servers.values_mut().next() {
+                        state.total_upload += bytes;
                     }
                 }
-            }
+                BandwidthEvents::Download(_session_id, bytes) => {
+                    if let Some(state) = self.servers.values_mut().next() {
+                        state.total_download += bytes;
+                    }
+                }
+            },
             // Error events are presentational only — the TUI consumes them
             // via the per-task event stream. ServerContainer has no
             // useful state to mutate.
             Events::Error(_) => {}
-            // ServerPool, ActiveDestination, and PinnedPeerStatuses are
-            // TUI-only — they surface the FindNodes pool, active
+            // ServerPool, PeerRoute, ActiveDestination, and
+            // PinnedPeerStatuses are TUI-only — they surface the
+            // FindNodes pool, per-peer connection routes, active
             // destination, and pinned-list health per server so the
             // NETWORK tab can render them. The ServerContainer doesn't
             // track this state.
             Events::ServerPool { .. }
+            | Events::PeerRoute { .. }
             | Events::ActiveDestination { .. }
             | Events::PinnedPeerStatuses { .. } => {}
         }
@@ -204,9 +203,13 @@ impl Counter for ServerContainer {
         let mut result = Vec::new();
         for (server, state) in &self.servers {
             result.push(ServerStateInfo {
-                server_id: format!("{}:{}", match &server.protocol {
-                    config::ProxyProtocols::Socks5 => "socks5",
-                }, server.port),
+                server_id: format!(
+                    "{}:{}",
+                    match &server.protocol {
+                        config::ProxyProtocols::Socks5 => "socks5",
+                    },
+                    server.port
+                ),
                 protocol: format!("{:?}", &server.protocol),
                 port: server.port,
                 state: state.clone(),
@@ -234,7 +237,7 @@ impl Counter for ServerContainer {
         let total_peers = self.servers.values().map(|s| s.peer_connections).sum();
         let total_upload = self.servers.values().map(|s| s.total_upload).sum();
         let total_download = self.servers.values().map(|s| s.total_download).sum();
-        
+
         let connection_status = if let Some(state) = self.servers.values().next() {
             match state.connection_status {
                 ConnectionStatus::Connected => "Connected".to_string(),
@@ -243,7 +246,7 @@ impl Counter for ServerContainer {
         } else {
             "No servers configured".to_string()
         };
-        
+
         let local_peer_id = self.servers.values().next().and_then(|s| s.local_peer_id);
 
         Ok(ProxyStats {

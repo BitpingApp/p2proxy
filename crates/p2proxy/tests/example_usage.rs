@@ -49,8 +49,7 @@ mod examples {
     #[test]
     fn example_config_with_bandwidth() {
         // Create a server requiring 100 Mbps minimum bandwidth
-        let high_bandwidth_server =
-            test_server_with_bandwidth(1080, ProxyProtocols::Socks5, 100);
+        let high_bandwidth_server = test_server_with_bandwidth(1080, ProxyProtocols::Socks5, 100);
 
         let config = test_config(vec![high_bandwidth_server]);
 

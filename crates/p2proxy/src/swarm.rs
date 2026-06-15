@@ -1,37 +1,37 @@
 use std::sync::Arc;
 use std::{sync::LazyLock, time::Duration};
 
+use crate::CONFIG;
 use crate::proxy_protocols::socks_stream::{DataDirection, SocksStreamMessage};
 use crate::stream_pool::{PoolConfig, StreamPool};
 use crate::utils::wait_ext::SwarmWaitExt;
-use crate::CONFIG;
-use crate::{proxy_protocols, GRPC_CHANNEL};
+use crate::{GRPC_CHANNEL, proxy_protocols};
 use bitping_swarm::auth::Auth;
-use color_eyre::eyre::{bail, eyre, Context, Result};
+use color_eyre::eyre::{Context, Result, bail, eyre};
 use color_eyre::owo_colors::OwoColorize;
 use futures::StreamExt;
 use libp2p::Multiaddr;
 use libp2p::{
-    dcutr, identify,
+    PeerId, Swarm, dcutr, identify,
     identity::{Keypair, PublicKey},
     multiaddr::{self, Protocol},
     noise, ping, relay,
     swarm::{NetworkBehaviour, SwarmEvent},
-    tcp, yamux, PeerId, Swarm,
+    tcp, yamux,
 };
 use libp2p_stream as stream;
 use metrics::{counter, gauge};
-use p2p_bandwidth_protocol::bandwidth_reporter::AuthedBandwidthReport;
-use p2p_protocol::{client::LibP2pClient, P2pClient};
 use models::config::Server;
 use models::events::Events;
 use models::{Counter, ServerContainer, ServerState};
+use p2p_bandwidth_protocol::bandwidth_reporter::AuthedBandwidthReport;
+use p2p_protocol::{P2pClient, client::LibP2pClient};
 use protocols::auth::v1::{
-    authentication_service_client::AuthenticationServiceClient, FederatedApiTokenAuthRequest,
+    FederatedApiTokenAuthRequest, authentication_service_client::AuthenticationServiceClient,
 };
 use sha2::Digest;
-use tokio::sync::mpsc::{self, Sender};
 use tokio::sync::RwLock;
+use tokio::sync::mpsc::{self, Sender};
 use tonic::codec::CompressionEncoding;
 use tracing::{debug, info, warn};
 
@@ -165,8 +165,7 @@ pub struct Bootstrapped {
     ///
     /// `ArcSwap` (rather than `tokio::RwLock`) because reads are lock-
     /// free — no need to await a read lock on every SOCKS connect.
-    destination_peers:
-        std::collections::HashMap<u16, Arc<arc_swap::ArcSwap<Option<PeerId>>>>,
+    destination_peers: std::collections::HashMap<u16, Arc<arc_swap::ArcSwap<Option<PeerId>>>>,
 
     /// Last time we ran an eager re-discovery for each port. Used to
     /// throttle the `PeerDisconnected` handler: if the same server
@@ -524,10 +523,16 @@ impl ProxyNetwork<Bootstrapped> {
             .0
             .proxy_message_channel
             .0
-            .send(SocksStreamMessage::DiscoverPeerForServer { server_config: server })
+            .send(SocksStreamMessage::DiscoverPeerForServer {
+                server_config: server,
+            })
             .await
         {
-            warn!(?e, port = server.port, "Failed to enqueue initial DiscoverPeerForServer");
+            warn!(
+                ?e,
+                port = server.port,
+                "Failed to enqueue initial DiscoverPeerForServer"
+            );
         }
 
         Ok(())
@@ -711,11 +716,7 @@ impl ProxyNetwork<Bootstrapped> {
                 };
                 // Same fix as Initialized — fan out via event_send so
                 // the TUI's bandwidth graph + totals actually update.
-                let _ = self
-                    .0
-                    .event_send
-                    .send(Events::Bandwidth(bw_event))
-                    .await;
+                let _ = self.0.event_send.send(Events::Bandwidth(bw_event)).await;
 
                 let dir_str = match direction {
                     DataDirection::Incoming => "incoming",
@@ -793,7 +794,14 @@ impl ProxyNetwork<Bootstrapped> {
                 // the TUI updates, and finally sends the peer back to
                 // the requesting session via the oneshot.
                 counter!("p2proxy_peer_requests_total").increment(1);
-                match crate::discovery::connect(self.discovery_engine(), server_config, shutdown, None).await {
+                match crate::discovery::connect(
+                    self.discovery_engine(),
+                    server_config,
+                    shutdown,
+                    None,
+                )
+                .await
+                {
                     Ok(destination) => {
                         counter!("p2proxy_peer_discoveries_successful_total").increment(1);
                         if let Some(handle) =
@@ -903,9 +911,7 @@ impl ProxyNetwork<Bootstrapped> {
                 // cooldown timer *before* the await so concurrent
                 // closes (which arrive on this same handler) all see
                 // a recent timestamp and short-circuit.
-                self.0
-                    .last_rediscovery
-                    .insert(server_config.port, now);
+                self.0.last_rediscovery.insert(server_config.port, now);
                 counter!(
                     "p2proxy_peer_proactive_rediscovery_total",
                     "port" => server_config.port.to_string()
@@ -916,8 +922,13 @@ impl ProxyNetwork<Bootstrapped> {
                     port = server_config.port,
                     "destination peer disconnected — running eager rediscovery"
                 );
-                match crate::discovery::connect(self.discovery_engine(), server_config, shutdown, Some(old_peer))
-                    .await
+                match crate::discovery::connect(
+                    self.discovery_engine(),
+                    server_config,
+                    shutdown,
+                    Some(old_peer),
+                )
+                .await
                 {
                     Ok(destination) => {
                         info!(?old_peer, new_peer = ?destination.peer, port = server_config.port, "warm-rediscovered destination peer");
@@ -970,11 +981,21 @@ impl ProxyNetwork<Bootstrapped> {
                 // except there's no old peer to validate against.
                 let Some(handle) = self.0.destination_peers.get(&server_config.port).cloned()
                 else {
-                    debug!(port = server_config.port, "DiscoverPeerForServer for unknown server, ignoring");
+                    debug!(
+                        port = server_config.port,
+                        "DiscoverPeerForServer for unknown server, ignoring"
+                    );
                     return Ok(());
                 };
                 info!(port = server_config.port, "running initial peer discovery");
-                match crate::discovery::connect(self.discovery_engine(), server_config, shutdown, None).await {
+                match crate::discovery::connect(
+                    self.discovery_engine(),
+                    server_config,
+                    shutdown,
+                    None,
+                )
+                .await
+                {
                     Ok(destination) => {
                         info!(peer = ?destination.peer, port = server_config.port, "destination peer discovered");
                         handle.store(Arc::new(Some(destination.peer)));
@@ -1017,11 +1038,41 @@ impl ProxyNetwork<Bootstrapped> {
     ) {
         // Handle bootstrap-specific events
         match &event {
-            SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+            SwarmEvent::ConnectionEstablished {
+                peer_id, endpoint, ..
+            } => {
                 if Some(*peer_id) == self.0.bootstrap_peer_id {
                     info!("Bootstrap connection established");
                     self.0.bootstrap_connected = true;
                     self.0.bootstrap_dialing = false;
+                } else if !endpoint.is_relayed() {
+                    // A direct (DCUtR-upgraded) connection to a destination peer
+                    // carries its real egress address — the hub only ever hands
+                    // out relay routes for NAT'd peers, so this is the one place
+                    // a peer's IP is learned. Promote it into the sticky pool so
+                    // the pool fills with proven, directly-reachable exits
+                    // (evicting relay-only standbys) instead of the address-less
+                    // candidates the hub returns. With multiple sticky servers
+                    // we can't tell which one dialed it, so only refresh members
+                    // already pooled.
+                    let address = endpoint.get_remote_address().clone();
+                    let sticky_servers: Vec<&models::config::Server> = CONFIG
+                        .servers
+                        .iter()
+                        .filter(|s| s.peer_options.sticky && s.peer_options.pinned().is_empty())
+                        .collect();
+                    if let [server] = sticky_servers.as_slice() {
+                        let fingerprint = server.peer_options.filter_fingerprint(server.port);
+                        self.0.sticky.promote_connected(
+                            server.port,
+                            &fingerprint,
+                            *peer_id,
+                            address,
+                            server.pool.max_total,
+                        );
+                    } else {
+                        self.0.sticky.note_direct_address(*peer_id, address);
+                    }
                 }
             }
             SwarmEvent::ConnectionClosed { peer_id, .. } => {
@@ -1049,11 +1100,7 @@ impl ProxyNetwork<Bootstrapped> {
                     // CONFIG.servers (&'static), so a single lookup is
                     // cheap and always succeeds — the entry only exists
                     // because configure_server put it there.
-                    let Some(server) = CONFIG
-                        .servers
-                        .iter()
-                        .find(|s| s.port == port)
-                    else {
+                    let Some(server) = CONFIG.servers.iter().find(|s| s.port == port) else {
                         continue;
                     };
                     let sender = self.0.proxy_message_channel.0.clone();
@@ -1134,12 +1181,29 @@ fn handle_swarm_events(
             // path was why the TUI's CONNECTED PEERS gauge sat at 1
             // (the bootstrap hub from with_swarm) regardless of how
             // many destination peers we actually had open.
+            //
+            // The endpoint's remote address is this peer's current dial
+            // route — a relay circuit at first, then the real direct
+            // address once DCUtR hole-punches. Forward it so the
+            // NETWORK tab can show the egress IP of the active peer.
+            // Ask the endpoint whether it's relayed rather than sniffing
+            // the address: an inbound relayed connection's remote address
+            // is a bare /p2p/<id> with no circuit marker.
+            let route = endpoint.get_remote_address().clone();
+            let relayed = endpoint.is_relayed();
             let tx = event_send.clone();
             tokio::spawn(async move {
                 let _ = tx
                     .send(Events::Connection(
                         models::events::ConnectionEvents::Connected(peer_id),
                     ))
+                    .await;
+                let _ = tx
+                    .send(Events::PeerRoute {
+                        peer_id,
+                        address: route,
+                        relayed,
+                    })
                     .await;
             });
         }

@@ -2,16 +2,16 @@ use std::sync::{Arc, LazyLock};
 
 use color_eyre::eyre::{Context, Result};
 use metrics_exporter_prometheus::PrometheusBuilder;
+use models::ServerContainer;
 use models::config::Config;
 use models::events::Events;
-use models::ServerContainer;
 use swarm::ProxyNetwork;
 use tokio::sync::RwLock;
 use tokio::task::JoinSet;
 use tonic::transport::{Channel, ClientTlsConfig};
 use tracing::level_filters::LevelFilter;
 use tracing_error::ErrorLayer;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
+use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
 mod discovery;
 mod proxy_protocols;
@@ -118,10 +118,8 @@ async fn main() -> Result<()> {
     // headless mode let color_eyre handle panic printing normally.
     if !no_ui {
         std::panic::set_hook(Box::new(|panic_info| {
-            let _ = crossterm::execute!(
-                std::io::stderr(),
-                crossterm::terminal::LeaveAlternateScreen
-            );
+            let _ =
+                crossterm::execute!(std::io::stderr(), crossterm::terminal::LeaveAlternateScreen);
             let _ = crossterm::terminal::disable_raw_mode();
             better_panic::Settings::auto()
                 .most_recent_first(false)

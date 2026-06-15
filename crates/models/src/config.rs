@@ -1,16 +1,12 @@
-use std::{
-    borrow::Cow,
-    fmt::Display,
-    str::FromStr,
-};
+use std::{borrow::Cow, fmt::Display, str::FromStr};
 
 use color_eyre::eyre;
 use figment::{
-    providers::{Env, Format, Yaml},
     Figment,
+    providers::{Env, Format, Yaml},
 };
 use human_bandwidth::re::bandwidth::Bandwidth;
-use libp2p::{multiaddr::Protocol, Multiaddr, PeerId};
+use libp2p::{Multiaddr, PeerId, multiaddr::Protocol};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -50,7 +46,9 @@ pub struct PoolConfigOptions {
     #[serde(default = "default_min_idle")]
     pub min_idle: usize,
 
-    /// Maximum total streams (idle + active) per peer
+    /// Maximum total streams (idle + active) per peer. Also caps the
+    /// sticky exit-peer pool — how many proven-good exits a discovery-driven
+    /// server remembers in `sticky_peers.json`.
     #[serde(default = "default_max_total")]
     pub max_total: usize,
 
@@ -114,7 +112,11 @@ impl Ord for PoolConfigOptions {
             .then_with(|| self.idle_timeout_secs.cmp(&other.idle_timeout_secs))
             .then_with(|| self.open_timeout_secs.cmp(&other.open_timeout_secs))
             .then_with(|| self.max_retries.cmp(&other.max_retries))
-            .then_with(|| self.max_error_rate.to_bits().cmp(&other.max_error_rate.to_bits()))
+            .then_with(|| {
+                self.max_error_rate
+                    .to_bits()
+                    .cmp(&other.max_error_rate.to_bits())
+            })
     }
 }
 
@@ -141,7 +143,7 @@ fn default_min_idle() -> usize {
 }
 
 fn default_max_total() -> usize {
-    30
+    5
 }
 
 fn default_idle_timeout_secs() -> u64 {
@@ -186,11 +188,19 @@ pub struct ServerPeerOptions {
     /// `true` falls back to country/bandwidth discovery.
     #[serde(default)]
     pub fallback_to_discovery: bool,
-    /// Remember the discovered exit peer in `sticky_peers.json` and try to
-    /// reuse it across restarts/reconnects for a stable egress IP. Only
+    /// Remember discovered exit peers in `sticky_peers.json` and try to
+    /// reuse them across restarts/reconnects for a stable egress IP. Only
     /// applies to servers without pinned peers. Default `true`.
     #[serde(default = "default_sticky")]
     pub sticky: bool,
+    /// What to do when the active sticky exit peer disconnects.
+    /// `with-backoff` (default) retries the same peer — known direct
+    /// address first, then a hub-resolved relay circuit (which follows a
+    /// peer that migrated hubs) — with exponential backoff before rotating
+    /// to another pool member and finally a fresh discovery. `fail-fast`
+    /// skips the retry and rotates immediately.
+    #[serde(default)]
+    pub sticky_reconnect: StickyReconnect,
     /// Country filter. Stored as Alpha-2 (the wire format the hub's
     /// `FindNodes` requirements expect). Accepts Alpha-2 ("RU"), Alpha-3
     /// ("RUS"), or country name ("Russia" / "Russian Federation") on
@@ -204,6 +214,22 @@ pub struct ServerPeerOptions {
 
 fn default_sticky() -> bool {
     true
+}
+
+/// How a discovery-driven server reacts when its active sticky exit peer
+/// disconnects. See `ServerPeerOptions::sticky_reconnect`.
+#[derive(
+    Serialize, Deserialize, Debug, Hash, Eq, PartialEq, PartialOrd, Ord, Clone, Copy, Default,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum StickyReconnect {
+    /// Fight to reconnect to the same exit peer (stable egress IP) before
+    /// rotating to another pool member or discovering a replacement.
+    #[default]
+    WithBackoff,
+    /// Don't retry the dropped peer — rotate to the next pool member /
+    /// discovery immediately.
+    FailFast,
 }
 
 /// One entry of the `destination_peers` preference list: the peer's identity
@@ -292,7 +318,9 @@ impl Serialize for DestinationPeerEntry {
 /// through arbitrary nodes.
 #[derive(Debug, Error)]
 pub enum ConfigValidationError {
-    #[error("server :{port}: destination_peers is present but empty — list at least one peer or remove the key")]
+    #[error(
+        "server :{port}: destination_peers is present but empty — list at least one peer or remove the key"
+    )]
     EmptyPinnedList { port: u16 },
 }
 
@@ -398,6 +426,7 @@ mod destination_peer_tests {
             destination_peers,
             fallback_to_discovery: false,
             sticky: true,
+            sticky_reconnect: StickyReconnect::default(),
             country: None,
             min_bandwidth: default_min_bandwith(),
         }
@@ -426,7 +455,10 @@ mod destination_peer_tests {
         let id = random_peer();
         let entry: DestinationPeerEntry = format!("/p2p/{id}").parse().expect("parses");
         assert_eq!(entry.peer_id, id);
-        assert_eq!(entry.address, None, "bare /p2p/<id> has no dialable address");
+        assert_eq!(
+            entry.address, None,
+            "bare /p2p/<id> has no dialable address"
+        );
     }
 
     #[test]
@@ -446,10 +478,7 @@ mod destination_peer_tests {
     #[test]
     fn serialize_roundtrips_original_string_form() {
         let id = random_peer();
-        for raw in [
-            id.to_string(),
-            format!("/ip4/9.9.9.9/tcp/31515/p2p/{id}"),
-        ] {
+        for raw in [id.to_string(), format!("/ip4/9.9.9.9/tcp/31515/p2p/{id}")] {
             let entry: DestinationPeerEntry = raw.parse().expect("parses");
             let yaml = serde_yaml_roundtrip(&entry);
             assert_eq!(yaml.peer_id, entry.peer_id);
@@ -538,7 +567,10 @@ mod country_parse_tests {
 
     #[test]
     fn iso_short_name() {
-        assert_eq!(parse_country_alpha2("Russian Federation").as_deref(), Some("RU"));
+        assert_eq!(
+            parse_country_alpha2("Russian Federation").as_deref(),
+            Some("RU")
+        );
     }
 
     #[test]

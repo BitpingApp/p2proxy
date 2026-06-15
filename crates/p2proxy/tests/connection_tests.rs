@@ -10,9 +10,9 @@
 mod common;
 
 use libp2p::{Multiaddr, PeerId};
+use models::Counter;
 use models::config::ProxyProtocols;
 use models::events::Events;
-use models::Counter;
 use socks5_impl::protocol::Address;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -468,10 +468,7 @@ async fn test_socks5_connect_domain() {
     let target_addr = Address::DomainAddress("example.com".to_string(), 80);
     let result = mock_socks5_client(port, target_addr).await;
 
-    assert!(
-        result.is_ok(),
-        "SOCKS5 domain connection should succeed"
-    );
+    assert!(result.is_ok(), "SOCKS5 domain connection should succeed");
 
     server.await.unwrap();
 }
@@ -725,8 +722,8 @@ async fn test_rpc_get_stats() {
 #[tokio::test]
 async fn test_rpc_watch_events() {
     use models::ServerContainer;
-    use tokio::sync::RwLock;
     use std::sync::Arc;
+    use tokio::sync::RwLock;
 
     let server_config = test_server(1080, ProxyProtocols::Socks5);
     let mut container = ServerContainer::new(vec![server_config]);

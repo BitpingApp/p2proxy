@@ -3,9 +3,9 @@ use std::{
     time::Instant,
 };
 
-use p2p_bandwidth_protocol::TargetAddr;
 use chrono::{DateTime, Utc};
-use libp2p::PeerId;
+use libp2p::{Multiaddr, PeerId, multiaddr::Protocol};
+use p2p_bandwidth_protocol::TargetAddr;
 
 #[derive(Default)]
 pub enum ConnectionStatus {
@@ -56,12 +56,12 @@ pub struct PrometheusMetrics {
 impl PrometheusMetrics {
     pub fn parse_from_text(text: &str) -> Self {
         let mut metrics = PrometheusMetrics::default();
-        
+
         for line in text.lines() {
             if line.starts_with('#') || line.trim().is_empty() {
                 continue;
             }
-            
+
             if let Some((metric_name, value_str)) = line.split_once(' ') {
                 if let Ok(value) = value_str.parse::<f64>() {
                     match metric_name {
@@ -82,24 +82,57 @@ impl PrometheusMetrics {
                 }
             }
         }
-        
+
         // Calculate rates (simplified - in real implementation you'd track over time)
         metrics.upload_rate = (metrics.total_upload_bytes as f64) / 1024.0 / 60.0; // Rough KB/s
         metrics.download_rate = (metrics.total_download_bytes as f64) / 1024.0 / 60.0; // Rough KB/s
-        
+
         // Mock server data for now - in real implementation, parse from metrics
-        metrics.servers = vec![
-            ServerInfo {
-                protocol: "SOCKS5".to_string(),
-                port: 1080,
-                active_sessions: metrics.total_sessions,
-                upload_rate: metrics.upload_rate,
-                download_rate: metrics.download_rate,
-            }
-        ];
-        
+        metrics.servers = vec![ServerInfo {
+            protocol: "SOCKS5".to_string(),
+            port: 1080,
+            active_sessions: metrics.total_sessions,
+            upload_rate: metrics.upload_rate,
+            download_rate: metrics.download_rate,
+        }];
+
         metrics
     }
+}
+
+/// Where a peer's known address came from, ordered worst → best. A
+/// confirmed live route always wins over a hub-advertised candidate, and
+/// a direct hole-punched route wins over a relay circuit — so the NETWORK
+/// tab shows the most authoritative address we have for each peer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AddrSource {
+    /// A dial route the hub returned for a FindNodes candidate — reachable
+    /// in principle, but we've never connected to confirm it.
+    Candidate,
+    /// A live connection that's still riding a relay circuit.
+    Relayed,
+    /// A live, direct (DCUtR-upgraded) connection — the peer's real egress.
+    Direct,
+}
+
+impl AddrSource {
+    /// Classify a candidate dial route by whether it hops through a relay
+    /// circuit. Used for FindNodes candidates, which have no live
+    /// connection to ask `endpoint.is_relayed()`; live routes are
+    /// classified from the endpoint instead.
+    pub fn classify_candidate(addr: &Multiaddr) -> Self {
+        if addr.iter().any(|p| matches!(p, Protocol::P2pCircuit)) {
+            AddrSource::Relayed
+        } else {
+            AddrSource::Direct
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PeerAddr {
+    pub addr: Multiaddr,
+    pub source: AddrSource,
 }
 
 pub struct UIState {
@@ -156,6 +189,12 @@ pub struct UIState {
     /// across session boundaries — see the note on `peers` about why
     /// we don't remove entries proactively.
     pub peer_bandwidth: HashMap<PeerId, (u64, u64)>,
+
+    /// Best-known dial address per peer, fed by FindNodes candidates and
+    /// live connection endpoints. The `source` priority means a direct
+    /// hole-punched route is never clobbered by a later relay/candidate
+    /// address. Rendered in the NETWORK tab's rotation pool.
+    pub peer_addresses: HashMap<PeerId, PeerAddr>,
 }
 
 impl UIState {
@@ -179,16 +218,32 @@ impl UIState {
             pinned_statuses: HashMap::new(),
             session_peer: HashMap::new(),
             peer_bandwidth: HashMap::new(),
+            peer_addresses: HashMap::new(),
         }
+    }
+
+    /// Record an address for `peer`, keeping only the most authoritative
+    /// one seen. A lower-priority source (e.g. a fresh FindNodes
+    /// candidate) never overwrites a higher-priority one (e.g. the
+    /// peer's live direct route), so the active peer's egress IP sticks.
+    pub fn note_peer_address(&mut self, peer: PeerId, addr: Multiaddr, source: AddrSource) {
+        let keep_existing = self
+            .peer_addresses
+            .get(&peer)
+            .is_some_and(|existing| existing.source > source);
+        if keep_existing {
+            return;
+        }
+        self.peer_addresses.insert(peer, PeerAddr { addr, source });
     }
 
     pub fn add_upload(&mut self, bytes: u64) {
         self.total_upload += bytes;
-        
+
         // Update upload rate (simplified - in real implementation you'd track over time)
         let now = chrono::Utc::now();
         self.upload_graph.push((now, bytes as f64 / 1024.0)); // Convert to KB
-        
+
         // Keep only last 30 seconds of data
         let cutoff_time = now - chrono::Duration::seconds(30);
         self.upload_graph.retain(|(time, _)| *time >= cutoff_time);
@@ -196,11 +251,11 @@ impl UIState {
 
     pub fn add_download(&mut self, bytes: u64) {
         self.total_download += bytes;
-        
+
         // Update download rate (simplified - in real implementation you'd track over time)
         let now = chrono::Utc::now();
         self.download_graph.push((now, bytes as f64 / 1024.0)); // Convert to KB
-        
+
         // Keep only last 30 seconds of data
         let cutoff_time = now - chrono::Duration::seconds(30);
         self.download_graph.retain(|(time, _)| *time >= cutoff_time);
@@ -212,10 +267,10 @@ impl UIState {
         self.total_download = metrics.total_download_bytes;
         self.upload_rate = metrics.upload_rate;
         self.download_rate = metrics.download_rate;
-        
+
         // Update servers
         self.servers = metrics.servers;
-        
+
         // Update connection status based on peer count
         if metrics.total_peers > 0 {
             // For now, use a dummy peer ID - in real implementation, get from metrics
@@ -223,17 +278,17 @@ impl UIState {
         } else {
             self.connection_status = ConnectionStatus::Disconnected;
         }
-        
+
         // Add bandwidth data points
         let now = chrono::Utc::now();
-        
+
         if self.upload_rate > 0.0 {
             self.upload_graph.push((now, self.upload_rate));
         }
         if self.download_rate > 0.0 {
             self.download_graph.push((now, self.download_rate));
         }
-        
+
         // Keep only last 30 seconds of data
         let cutoff_time = now - chrono::Duration::seconds(30);
         self.upload_graph.retain(|(time, _)| *time >= cutoff_time);

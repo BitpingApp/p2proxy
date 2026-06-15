@@ -36,8 +36,8 @@
 //! ```
 
 use libp2p::{Multiaddr, PeerId};
-use rand::{Rng, SeedableRng};
 use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
@@ -109,9 +109,7 @@ pub enum MockSwarmEvent {
     },
 
     /// New listening address
-    NewListenAddr {
-        address: Multiaddr,
-    },
+    NewListenAddr { address: Multiaddr },
 
     /// Identify event received
     IdentifyReceived {
@@ -120,9 +118,7 @@ pub enum MockSwarmEvent {
     },
 
     /// Relay reservation accepted
-    RelayReservationAccepted {
-        relay_peer_id: PeerId,
-    },
+    RelayReservationAccepted { relay_peer_id: PeerId },
 
     /// DCUtR (Direct Connection Upgrade through Relay) event
     DcutrEvent {
@@ -269,7 +265,8 @@ impl MockSwarm {
         }
 
         self.listen_addresses.push(addr.clone());
-        self.event_queue.push_back(MockSwarmEvent::NewListenAddr { address: addr });
+        self.event_queue
+            .push_back(MockSwarmEvent::NewListenAddr { address: addr });
 
         Ok(())
     }
@@ -310,20 +307,22 @@ impl MockSwarm {
         // Check if connection should succeed
         if !self.should_succeed() {
             let error = MockConnectionError::Timeout;
-            self.event_queue.push_back(MockSwarmEvent::OutgoingConnectionError {
-                peer_id: Some(peer_id),
-                error: error.clone(),
-            });
+            self.event_queue
+                .push_back(MockSwarmEvent::OutgoingConnectionError {
+                    peer_id: Some(peer_id),
+                    error: error.clone(),
+                });
             return Err(error);
         }
 
         // Simulate packet loss
         if self.should_drop_packet() {
             let error = MockConnectionError::Timeout;
-            self.event_queue.push_back(MockSwarmEvent::OutgoingConnectionError {
-                peer_id: Some(peer_id),
-                error: error.clone(),
-            });
+            self.event_queue
+                .push_back(MockSwarmEvent::OutgoingConnectionError {
+                    peer_id: Some(peer_id),
+                    error: error.clone(),
+                });
             return Err(error);
         }
 
@@ -344,25 +343,25 @@ impl MockSwarm {
         );
 
         // Queue connection established event
-        self.event_queue.push_back(MockSwarmEvent::ConnectionEstablished {
-            peer_id,
-            endpoint,
-            num_established,
-        });
+        self.event_queue
+            .push_back(MockSwarmEvent::ConnectionEstablished {
+                peer_id,
+                endpoint,
+                num_established,
+            });
 
         // Queue identify event (simulating libp2p identify protocol)
         let mut info = MockIdentifyInfo::default();
         info.listen_addrs = self.listen_addresses.clone();
-        self.event_queue.push_back(MockSwarmEvent::IdentifyReceived {
-            peer_id,
-            info,
-        });
+        self.event_queue
+            .push_back(MockSwarmEvent::IdentifyReceived { peer_id, info });
 
         // If using relay, queue relay reservation event
         if self.config.use_relay {
-            self.event_queue.push_back(MockSwarmEvent::RelayReservationAccepted {
-                relay_peer_id: peer_id,
-            });
+            self.event_queue
+                .push_back(MockSwarmEvent::RelayReservationAccepted {
+                    relay_peer_id: peer_id,
+                });
         }
 
         Ok(())
@@ -391,10 +390,11 @@ impl MockSwarm {
             sleep(self.config.latency).await;
 
             let num_established = self.connected_peers.len() as u32;
-            self.event_queue.push_back(MockSwarmEvent::ConnectionClosed {
-                peer_id,
-                num_established,
-            });
+            self.event_queue
+                .push_back(MockSwarmEvent::ConnectionClosed {
+                    peer_id,
+                    num_established,
+                });
         }
     }
 
@@ -557,7 +557,10 @@ mod tests {
 
         // Should have events queued (ConnectionEstablished and IdentifyReceived)
         let event1 = swarm.poll_event().await;
-        assert!(matches!(event1, Some(MockSwarmEvent::ConnectionEstablished { .. })));
+        assert!(matches!(
+            event1,
+            Some(MockSwarmEvent::ConnectionEstablished { .. })
+        ));
 
         // Poll identify event
         let _event2 = swarm.poll_event().await;
@@ -569,7 +572,10 @@ mod tests {
 
         // Should have disconnect event
         let disconnect_event = swarm.poll_event().await;
-        assert!(matches!(disconnect_event, Some(MockSwarmEvent::ConnectionClosed { .. })));
+        assert!(matches!(
+            disconnect_event,
+            Some(MockSwarmEvent::ConnectionClosed { .. })
+        ));
     }
 
     #[tokio::test]
@@ -606,6 +612,9 @@ mod tests {
         // Third connection should fail
         let peer3 = PeerId::random();
         let result = swarm.connect_to_peer(peer3).await;
-        assert!(matches!(result, Err(MockConnectionError::ConnectionRefused)));
+        assert!(matches!(
+            result,
+            Err(MockConnectionError::ConnectionRefused)
+        ));
     }
 }

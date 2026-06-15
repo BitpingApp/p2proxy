@@ -1,12 +1,12 @@
+use libp2p::{Multiaddr, multiaddr::Protocol};
 use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap},
 };
 
-use super::{
-    Ui, ACCENT, BACKGROUND, BORDER, FOREGROUND, PRIMARY, SECONDARY, SUCCESS, WARN,
-};
+use super::{ACCENT, BACKGROUND, BORDER, FOREGROUND, PRIMARY, SECONDARY, SUCCESS, Ui, WARN};
 use crate::CONFIG;
+use crate::tui::ui_state::{AddrSource, PeerAddr};
 
 impl Ui {
     /// Per-server breakdown of the proxy fleet. One block per server in
@@ -124,9 +124,7 @@ impl Ui {
         let active_label = match active {
             Some(_) => Span::styled(
                 "active",
-                Style::default()
-                    .fg(SUCCESS)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(SUCCESS).add_modifier(Modifier::BOLD),
             ),
             None => Span::styled("idle", Style::default().fg(WARN)),
         };
@@ -145,16 +143,16 @@ impl Ui {
             ),
             port_span,
             Span::raw("  "),
-            Span::styled(format!("country: {country}"), Style::default().fg(FOREGROUND)),
+            Span::styled(
+                format!("country: {country}"),
+                Style::default().fg(FOREGROUND),
+            ),
             Span::raw("  ·  "),
             active_label,
             Span::raw("  ·  "),
             Span::styled(format!("pool: {pool_size}"), Style::default().fg(ACCENT)),
             Span::raw("  ·  "),
-            Span::styled(
-                "[Enter] expand",
-                Style::default().fg(BORDER),
-            ),
+            Span::styled("[Enter] expand", Style::default().fg(BORDER)),
         ]);
 
         let border_color = if is_selected { ACCENT } else { BORDER };
@@ -212,10 +210,10 @@ impl Ui {
             filter_parts.join("  ·  ")
         };
 
-        // Active-destination summary: PeerId truncated to 12 chars
-        // (enough to recognise + uniquely identify in practice), plus
-        // total bytes attributed to that peer so far and how it was
-        // selected (pinned rank / sticky / discovered).
+        // Active-destination summary: full PeerId (so it's verifiably the
+        // same id persisted in sticky_peers.json), plus total bytes
+        // attributed to that peer so far and how it was selected
+        // (pinned rank / sticky / discovered).
         let active_line = match self.state.active_destinations.get(&server.port) {
             Some(peer_id) => {
                 let bytes = self
@@ -227,7 +225,10 @@ impl Ui {
                 let mut spans = vec![
                     Span::styled("active: ", Style::default().fg(BORDER)),
                     Span::styled(
-                        format!("{:.16}", peer_id.to_string()),
+                        fit_peer_id(
+                            &peer_id.to_string(),
+                            (area.width as usize).saturating_sub(56),
+                        ),
                         Style::default().fg(SUCCESS).add_modifier(Modifier::BOLD),
                     ),
                 ];
@@ -237,9 +238,7 @@ impl Ui {
                             format!("pinned[{rank}]")
                         }
                         models::events::DestinationSource::Sticky => "sticky".to_string(),
-                        models::events::DestinationSource::Discovered => {
-                            "discovered".to_string()
-                        }
+                        models::events::DestinationSource::Discovered => "discovered".to_string(),
                     };
                     spans.push(Span::styled("  ·  ", Style::default().fg(BORDER)));
                     spans.push(Span::styled(badge, Style::default().fg(PRIMARY)));
@@ -286,19 +285,25 @@ impl Ui {
             let active = self.state.active_destinations.get(&server.port);
             for status in statuses {
                 let (badge, badge_style) = if Some(&status.peer_id) == active {
-                    ("active", Style::default().fg(SUCCESS).add_modifier(Modifier::BOLD))
+                    (
+                        "active",
+                        Style::default().fg(SUCCESS).add_modifier(Modifier::BOLD),
+                    )
                 } else if status.resolvable {
                     ("ok", Style::default().fg(ACCENT))
                 } else {
-                    ("STALE", Style::default().fg(WARN).add_modifier(Modifier::BOLD))
+                    (
+                        "STALE",
+                        Style::default().fg(WARN).add_modifier(Modifier::BOLD),
+                    )
                 };
                 lines.push(Line::from(vec![
+                    Span::styled(format!("  [{}] ", status.rank), Style::default().fg(BORDER)),
                     Span::styled(
-                        format!("  [{}] ", status.rank),
-                        Style::default().fg(BORDER),
-                    ),
-                    Span::styled(
-                        format!("{:.16}", status.peer_id.to_string()),
+                        fit_peer_id(
+                            &status.peer_id.to_string(),
+                            (area.width as usize).saturating_sub(18),
+                        ),
                         Style::default().fg(FOREGROUND),
                     ),
                     Span::styled("  ", Style::default()),
@@ -309,7 +314,10 @@ impl Ui {
             lines.push(Line::from(vec![
                 Span::styled("pool: ", Style::default().fg(BORDER)),
                 Span::styled(
-                    format!("{pool_size} candidate{}", if pool_size == 1 { "" } else { "s" }),
+                    format!(
+                        "{pool_size} candidate{}",
+                        if pool_size == 1 { "" } else { "s" }
+                    ),
                     Style::default().fg(ACCENT),
                 ),
             ]));
@@ -319,7 +327,11 @@ impl Ui {
             " ▾ :{}  ({:?}) {} ",
             server.port,
             server.protocol,
-            if is_selected { "· [Enter] collapse" } else { "" }
+            if is_selected {
+                "· [Enter] collapse"
+            } else {
+                ""
+            }
         );
         let border_color = if is_selected { ACCENT } else { BORDER };
         let paragraph = Paragraph::new(lines)
@@ -354,22 +366,29 @@ impl Ui {
 
         let active = self.state.active_destinations.get(&server.port).copied();
 
-        let header = Row::new(["", "Peer ID", "Status", "↑ bytes", "↓ bytes"].iter().map(
-            |h| Cell::from(*h).style(Style::default().fg(PRIMARY).add_modifier(Modifier::BOLD)),
-        ))
+        let header = Row::new(
+            ["", "Peer ID", "Address", "Status", "↑ bytes", "↓ bytes"]
+                .iter()
+                .map(|h| {
+                    Cell::from(*h).style(Style::default().fg(PRIMARY).add_modifier(Modifier::BOLD))
+                }),
+        )
         .height(1)
         .bottom_margin(1);
 
         let rows: Vec<Row> = if pool.is_empty() {
-            vec![Row::new(vec![
-                Cell::from("—"),
-                Cell::from("—"),
-                Cell::from("waiting for FindNodes response…")
-                    .style(Style::default().fg(SECONDARY)),
-                Cell::from("—"),
-                Cell::from("—"),
-            ])
-            .height(1)]
+            vec![
+                Row::new(vec![
+                    Cell::from("—"),
+                    Cell::from("—"),
+                    Cell::from("—"),
+                    Cell::from("waiting for FindNodes response…")
+                        .style(Style::default().fg(SECONDARY)),
+                    Cell::from("—"),
+                    Cell::from("—"),
+                ])
+                .height(1),
+            ]
         } else {
             pool.into_iter()
                 .map(|peer_id| {
@@ -394,9 +413,12 @@ impl Ui {
                     } else {
                         Style::default().fg(FOREGROUND)
                     };
+                    let (addr_text, addr_style) =
+                        addr_cell(self.state.peer_addresses.get(&peer_id), is_active);
                     Row::new(vec![
                         Cell::from(marker).style(status_style),
-                        Cell::from(format!("{:.20}", peer_id.to_string())).style(id_style),
+                        Cell::from(peer_id.to_string()).style(id_style),
+                        Cell::from(addr_text).style(addr_style),
                         Cell::from(status_label).style(status_style),
                         Cell::from(human_bytes(bytes.0)).style(Style::default().fg(ACCENT)),
                         Cell::from(human_bytes(bytes.1)).style(Style::default().fg(ACCENT)),
@@ -406,12 +428,16 @@ impl Ui {
                 .collect()
         };
 
+        // Peer ID gets a 52-col floor so the full base58 id never
+        // truncates; the byte/status columns are kept tight so the floor
+        // is satisfied on narrower terminals before the id has to clip.
         let widths = [
             Constraint::Length(2),
-            Constraint::Min(24),
+            Constraint::Min(52),
+            Constraint::Min(20),
+            Constraint::Length(9),
             Constraint::Length(10),
-            Constraint::Length(12),
-            Constraint::Length(12),
+            Constraint::Length(10),
         ];
         let table = Table::new(rows, widths)
             .header(header)
@@ -419,14 +445,86 @@ impl Ui {
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(BORDER))
-                    .title(Span::styled(
-                        " rotation pool ",
-                        Style::default().fg(ACCENT),
-                    )),
+                    .title(Span::styled(" rotation pool ", Style::default().fg(ACCENT))),
             )
             .style(Style::default().bg(BACKGROUND).fg(FOREGROUND));
         frame.render_widget(table, area);
     }
+}
+
+/// Fit a peer id into `max` columns for the header summary lines, keeping
+/// the head and tail so it stays recognisable when the terminal is too
+/// narrow for the full 52-char id. Returns the full id whenever it fits,
+/// so wide terminals show it in full and the header line never wraps.
+fn fit_peer_id(id: &str, max: usize) -> String {
+    if id.len() <= max {
+        return id.to_string();
+    }
+    if max <= 1 {
+        return id.chars().take(max).collect();
+    }
+    // base58 peer ids are ASCII, so byte slicing is on char boundaries.
+    let keep = max - 1;
+    let head = keep.div_ceil(2);
+    let tail = keep - head;
+    format!("{}…{}", &id[..head], &id[id.len() - tail..])
+}
+
+/// Rotation-pool Address cell. The active peer's confirmed direct route
+/// is the headline — its real egress IP, bright. Standby peers show a
+/// dimmer last-known/advertised address; peers we only reach through a
+/// relay (or whose address carries no host) show `—` rather than a
+/// misleading relay host or raw multiaddr.
+fn addr_cell(entry: Option<&PeerAddr>, is_active: bool) -> (String, Style) {
+    let dash = ("—".to_string(), Style::default().fg(BORDER));
+    let Some(entry) = entry else {
+        return dash;
+    };
+    // Only an extractable IP/DNS host is this peer's egress. A relay
+    // circuit's host belongs to the relay, and a bare /p2p/<id> has none —
+    // both yield None and fall through to the relayed/dash arms.
+    match (entry.source, multiaddr_host(&entry.addr)) {
+        (AddrSource::Direct, Some(host)) => {
+            let style = if is_active {
+                Style::default().fg(SUCCESS).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(FOREGROUND)
+            };
+            (host, style)
+        }
+        (AddrSource::Candidate, Some(host)) => (host, Style::default().fg(SECONDARY)),
+        (AddrSource::Relayed, _) => (
+            "relayed".to_string(),
+            Style::default().fg(if is_active { WARN } else { BORDER }),
+        ),
+        _ => dash,
+    }
+}
+
+/// Compact `host[:port]` for display — the IP/DNS host and transport port
+/// pulled out of a multiaddr. Returns `None` for relay-circuit routes
+/// (the host there is the relay's, not this peer's) and for addresses
+/// with no host at all, so the caller can render `—` instead of noise.
+fn multiaddr_host(addr: &Multiaddr) -> Option<String> {
+    let mut host: Option<String> = None;
+    let mut port: Option<u16> = None;
+    for proto in addr.iter() {
+        match proto {
+            Protocol::P2pCircuit => return None,
+            Protocol::Ip4(ip) => host = Some(ip.to_string()),
+            Protocol::Ip6(ip) => host = Some(format!("[{ip}]")),
+            Protocol::Dns(h) | Protocol::Dns4(h) | Protocol::Dns6(h) | Protocol::Dnsaddr(h) => {
+                host = Some(h.to_string());
+            }
+            Protocol::Tcp(p) | Protocol::Udp(p) => port = Some(p),
+            _ => {}
+        }
+    }
+    let host = host?;
+    Some(match port {
+        Some(p) => format!("{host}:{p}"),
+        None => host,
+    })
 }
 
 /// Pretty-print bytes with SI suffix. Tight 10-char-or-so output that
