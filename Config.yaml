@@ -11,6 +11,12 @@ port: 45445
 # Logging verbosity: trace | debug | info | warn | error
 log_level: info
 
+# Optional top-level overrides (all have sensible defaults):
+# grpc_url: https://grpc.bitping.com   # Bitping auth service gRPC endpoint
+# keypair_path: node_keypair.bin       # where the node identity is persisted
+# metrics_addr: 127.0.0.1:9091         # Prometheus bind addr; use 0.0.0.0:9091
+#                                      # to scrape metrics from another host
+
 # One or more proxy endpoints. Each entry opens a local listener and
 # routes traffic through peers matching the filter.
 servers:
@@ -46,15 +52,10 @@ servers:
     #
     # sticky: true
 
-    # Optional: connection pool tuning. The pool keeps a warm set of P2P
-    # streams open so SOCKS5 handshakes don't pay the libp2p dial cost.
-    # All fields below have sensible defaults; uncomment to override.
+    # Optional: per-server stream tuning. (Not a connection pool — streams
+    # are not kept warm.) Both fields have defaults; uncomment to override.
     #
     # pool:
-    #   enabled: true
-    #   min_idle: 5            # always keep this many warm streams
-    #   max_total: 30          # hard ceiling on concurrent streams
-    #   idle_timeout_secs: 60  # drop streams idle longer than this
-    #   open_timeout_secs: 20  # give up dialing after this long
-    #   max_retries: 3         # retries for a failed request
-    #   max_error_rate: 0.15   # rotate peer if error rate exceeds 15%
+    #   max_total: 30          # max concurrent stream opens per peer; also
+    #                          # bounds the remembered sticky exit pool
+    #   open_timeout_secs: 20  # give up opening a stream after this long
