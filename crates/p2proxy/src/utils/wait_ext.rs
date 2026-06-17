@@ -1,5 +1,3 @@
-// wait_ext.rs
-use async_trait::async_trait;
 use futures::{Future, StreamExt};
 use libp2p::swarm::{Swarm, SwarmEvent};
 use std::pin::Pin; // Add this import
@@ -40,7 +38,7 @@ where
         F: FnMut(&mut Self, &Self::Event) -> Option<R> + Send + 'static,
         R: 'static,
     {
-        let mut this = self;
+        let this = self;
         Box::pin(async move {
             loop {
                 if let Some(event) = this.next().await {
@@ -63,7 +61,7 @@ where
         F: FnMut(&mut Self, &Self::Event) -> Option<R> + Send + 'static,
         R: 'static,
     {
-        let mut this = self;
+        let this = self;
         Box::pin(async move {
             tokio::time::timeout(timeout, async move {
                 loop {

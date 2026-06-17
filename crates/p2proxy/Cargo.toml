@@ -12,7 +12,6 @@ dist = true
 
 [dependencies]
 # Workspace-shared
-async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
@@ -45,9 +44,8 @@ hex.workspace = true
 rand.workspace = true
 tonic = { workspace = true }
 base58-monero.workspace = true
+dashmap = { workspace = true }
 
-# p2proxy-shared (added to root workspace for Wave A)
-remoc.workspace = true
 postbag.workspace = true
 uuid.workspace = true
 blake3.workspace = true
@@ -60,7 +58,7 @@ p2p-bandwidth-protocol.workspace = true
 p2p-protocol.workspace = true
 protocols.workspace = true
 authenticator-service.workspace = true
-models = { path = "../models", package = "p2proxy-models" }
+p2proxy-core = { path = "../core" }
 
 # TUI stack — versions pinned at the workspace level, aligned with bitpingd
 figment = { workspace = true, features = ["yaml"] }
@@ -74,28 +72,11 @@ tui-components.workspace = true
 tachyonfx.workspace = true
 ratatui-splash-screen.workspace = true
 
-# Inline (no other workspace user yet)
 tokio-util = { version = "0.7", features = ["rt"] }
-# Lock-free atomic Arc swap. Used for the per-server "current destination
-# peer" handle that the SOCKS accept loop reads on every session and the
-# swarm event loop replaces on ConnectionClosed — see swarm.rs
-# Bootstrapped::destination_peers.
+clap = { version = "4", features = ["derive", "env"] }
+# Lock-free per-server destination handle, read on every SOCKS session.
 arc-swap = "1.7"
 
 [dev-dependencies]
-tokio-test = "0.4"
-criterion = { version = "0.5", features = ["async_tokio"] }
-proptest = "1.4"
-mockall = "0.12"
-serial_test = "3.0"
+p2proxy-core = { path = "../core", features = ["testing"] }
 tempfile = "3.8"
-assert_matches = "1.5"
-human-bandwidth = { version = "0.1.3", features = ["serde"] }
-
-[[bench]]
-name = "throughput_bench"
-harness = false
-
-[[bench]]
-name = "latency_bench"
-harness = false

@@ -1,15 +1,12 @@
-use std::time::Instant;
 
-use libp2p::bytes;
 use ratatui::{
     prelude::*,
     widgets::{Axis, Block, Borders, Chart, Dataset, Gauge, GraphType, Paragraph, Wrap},
 };
-use tracing::debug;
 
 use super::{
     ACCENT, BACKGROUND, BORDER, ERROR, FOREGROUND, PRIMARY, SECONDARY, SUCCESS, Ui, WARN,
-    ui_state::{ConnectionStatus, UIState},
+    ui_state::ConnectionStatus,
 };
 
 impl Ui {

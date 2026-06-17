@@ -10,18 +10,20 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use futures::StreamExt;
-use models::events::Events;
+use proxy_core::config::Config;
+use proxy_core::events::Events;
+use std::sync::Arc;
 use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Tabs},
 };
 use std::{
-    io, process,
+    io,
     time::{Duration, Instant},
 };
 use tokio::{select, sync::mpsc::Receiver, time::interval};
-use tracing::{debug, info};
-use ui_state::{AddrSource, ConnectionStatus, ProxySession, UIState};
+use tracing::debug;
+use ui_state::{AddrSource, ConnectionStatus, UIState};
 
 mod logs;
 mod network;
@@ -50,13 +52,10 @@ const BORDER: Color = theme::BORDER;
 const SUCCESS: Color = theme::SUCCESS;
 const ERROR: Color = theme::ERROR;
 const WARN: Color = theme::WARNING;
-const MISC: Color = theme::INFO;
-const DIM: Color = theme::DIM;
 const BACKGROUND: Color = theme::BG;
 const FOREGROUND: Color = Color::Reset;
 
 pub struct Ui {
-    show_splash: bool,
     splash_start_time: Instant,
     show_logs: bool,
     tab_index: usize,
@@ -85,12 +84,16 @@ pub struct Ui {
     /// Defaults to "first server expanded, rest collapsed" so the
     /// tab isn't empty on first open.
     pub(crate) network_expanded: std::collections::HashSet<u16>,
+    config: Arc<Config>,
 }
 
-impl Default for Ui {
-    fn default() -> Self {
+impl Ui {
+    pub fn new(config: Arc<Config>) -> Self {
+        let mut network_expanded = std::collections::HashSet::new();
+        if let Some(first) = config.servers.first() {
+            network_expanded.insert(first.port);
+        }
         Self {
-            show_splash: true,
             splash_start_time: Instant::now(),
             show_logs: false,
             tab_index: 0,
@@ -102,24 +105,9 @@ impl Default for Ui {
             log_state: tui_logger::TuiWidgetState::new(),
             export_prompt: tui_components::export::ExportPromptState::new(),
             network_selected_idx: 0,
-            // Pre-expand the first server so the tab isn't all
-            // one-liners on first open. The first entry in
-            // `CONFIG.servers` order — whatever that is — gets the
-            // big-render treatment until the user toggles.
-            network_expanded: {
-                let mut s = std::collections::HashSet::new();
-                if let Some(first) = crate::CONFIG.servers.first() {
-                    s.insert(first.port);
-                }
-                s
-            },
+            network_expanded,
+            config,
         }
-    }
-}
-
-impl Ui {
-    pub fn new() -> Self {
-        Self::default()
     }
 
     pub fn mark_dirty(&mut self) {
@@ -132,16 +120,6 @@ impl Ui {
     pub fn start_animation(&mut self) {
         self.animation_start = Instant::now();
         self.is_animating = true;
-    }
-
-    fn update_animation_state(&mut self) -> bool {
-        let progress = self.animation_progress();
-        if progress >= 1.0 && self.is_animating {
-            self.is_animating = false;
-            true // One final render needed
-        } else {
-            self.is_animating
-        }
     }
 
     pub fn toggle_logs(&mut self) {
@@ -172,7 +150,7 @@ impl Ui {
 
     /// Network tab: move the focus to the next server (wrapping).
     pub fn network_select_next(&mut self) {
-        let n = crate::CONFIG.servers.len();
+        let n = self.config.servers.len();
         if n == 0 {
             return;
         }
@@ -181,7 +159,7 @@ impl Ui {
 
     /// Network tab: move the focus to the previous server (wrapping).
     pub fn network_select_prev(&mut self) {
-        let n = crate::CONFIG.servers.len();
+        let n = self.config.servers.len();
         if n == 0 {
             return;
         }
@@ -197,7 +175,7 @@ impl Ui {
     /// uses ports as keys — surviving `CONFIG.servers` reordering on a
     /// future config reload without dropping the expanded set.
     pub fn network_toggle_expand_selected(&mut self) {
-        let Some(server) = crate::CONFIG.servers.get(self.network_selected_idx) else {
+        let Some(server) = self.config.servers.get(self.network_selected_idx) else {
             return;
         };
         if !self.network_expanded.remove(&server.port) {
@@ -218,6 +196,7 @@ impl Ui {
     pub async fn run_ui(
         mut state_events: Receiver<Events>,
         shutdown: tokio_util::sync::CancellationToken,
+        config: Arc<Config>,
     ) -> Result<()> {
         // Set up terminal
         enable_raw_mode()?;
@@ -227,7 +206,7 @@ impl Ui {
         let mut terminal = Terminal::new(backend)?;
 
         // Create UI state
-        let mut ui = Ui::new();
+        let mut ui = Ui::new(config);
 
         // 100ms = 10fps. Drives the "tick" that repaints time-sensitive
         // widgets (bandwidth chart's seconds-ago X axis, animations,
@@ -419,10 +398,10 @@ impl Ui {
                 self.state.local_peer_id.replace(peer_id);
             }
             Events::Connection(connection_events) => match connection_events {
-                models::events::ConnectionEvents::Connecting => {
+                proxy_core::events::ConnectionEvents::Connecting => {
                     self.state.connection_status = ConnectionStatus::Connecting;
                 }
-                models::events::ConnectionEvents::Connected(peer_id) => {
+                proxy_core::events::ConnectionEvents::Connected(peer_id) => {
                     self.state.connection_status = ConnectionStatus::Connected(peer_id);
                     // The hub we're relaying through counts as a peer for
                     // dashboard purposes — without this the CONNECTED
@@ -433,7 +412,7 @@ impl Ui {
                     // is irrelevant noise — clear the banner.
                     self.state.last_error = None;
                 }
-                models::events::ConnectionEvents::Disconnected(peer_id) => {
+                proxy_core::events::ConnectionEvents::Disconnected(peer_id) => {
                     // Per-peer disconnect. Previously the variant was
                     // unit (no peer id) so this branch nuked the
                     // entire `state.peers` set on a single peer
@@ -469,22 +448,14 @@ impl Ui {
                 }
             },
             Events::Session(session_events) => match session_events {
-                models::events::SessionEvents::New(id, endpoint, peer_id) => {
-                    // Destination peers count too — a session opens a
-                    // proxy stream to one, so they show up in NETWORK
-                    // alongside the hub.
+                proxy_core::events::SessionEvents::New(id, _target, peer_id) => {
+                    // A session opens a proxy stream to its peer, so the peer
+                    // shows up in NETWORK alongside the hub.
                     self.state.peers.insert(peer_id);
                     self.state.session_peer.insert(id, peer_id);
-                    self.state.sessions.insert(
-                        id,
-                        ProxySession {
-                            id,
-                            peer_id,
-                            endpoint,
-                        },
-                    );
+                    self.state.sessions.insert(id);
                 }
-                models::events::SessionEvents::End(uuid) => {
+                proxy_core::events::SessionEvents::End(uuid) => {
                     self.state.sessions.remove(&uuid);
                     self.state.session_peer.remove(&uuid);
                     // Intentionally don't remove peer_id from peers —
@@ -495,7 +466,7 @@ impl Ui {
                 }
             },
             Events::Bandwidth(bandwidth_events) => match bandwidth_events {
-                models::events::BandwidthEvents::Upload(session_id, u) => {
+                proxy_core::events::BandwidthEvents::Upload(session_id, u) => {
                     self.state.add_upload(u);
                     // Per-peer accumulator — only works if we still
                     // have the session→peer mapping, which we do until
@@ -506,7 +477,7 @@ impl Ui {
                         self.state.peer_bandwidth.entry(peer).or_default().0 += u;
                     }
                 }
-                models::events::BandwidthEvents::Download(session_id, d) => {
+                proxy_core::events::BandwidthEvents::Download(session_id, d) => {
                     self.state.add_download(d);
                     if let Some(&peer) = self.state.session_peer.get(&session_id) {
                         self.state.peer_bandwidth.entry(peer).or_default().1 += d;
@@ -706,5 +677,75 @@ impl Ui {
             .highlight_style(Style::default().fg(PRIMARY).add_modifier(Modifier::BOLD));
 
         frame.render_widget(tabs, area);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proxy_core::events::{BandwidthEvents, ConnectionEvents, Events};
+    use proxy_core::testing::builders::peer;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    fn test_ui() -> Ui {
+        Ui::new(crate::runtime::testutil::test_config())
+    }
+
+    fn rendered(ui: &mut Ui) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
+        terminal.draw(|f| ui.render(f)).expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+        let mut out = String::new();
+        for y in 0..40u16 {
+            for x in 0..120u16 {
+                if let Some(cell) = buffer.cell((x, y)) {
+                    out.push_str(cell.symbol());
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn reducer_tracks_peers_status_and_errors() {
+        let mut ui = test_ui();
+        let p = peer();
+        ui.handle_swarm_events(Events::Connection(ConnectionEvents::Connected(p)));
+        assert!(ui.state.peers.contains(&p));
+        assert!(matches!(
+            ui.state.connection_status,
+            ConnectionStatus::Connected(_)
+        ));
+
+        ui.handle_swarm_events(Events::Error("no peers match filter".into()));
+        assert_eq!(ui.state.last_error.as_deref(), Some("no peers match filter"));
+
+        ui.handle_swarm_events(Events::Connection(ConnectionEvents::Disconnected(p)));
+        assert!(!ui.state.peers.contains(&p));
+    }
+
+    #[test]
+    fn bandwidth_events_accumulate_totals() {
+        let mut ui = test_ui();
+        let id = uuid::Uuid::new_v4();
+        ui.handle_swarm_events(Events::Bandwidth(BandwidthEvents::Download(id, 4096)));
+        ui.handle_swarm_events(Events::Bandwidth(BandwidthEvents::Upload(id, 1024)));
+        assert_eq!(ui.state.total_download, 4096);
+        assert_eq!(ui.state.total_upload, 1024);
+    }
+
+    #[test]
+    fn renders_overview_and_network_tabs() {
+        let mut ui = test_ui();
+        let overview = rendered(&mut ui);
+        assert!(overview.contains("OVERVIEW"), "overview tab header present");
+
+        ui.next_tab();
+        let network = rendered(&mut ui);
+        assert!(
+            network.contains("1080"),
+            "network tab shows the configured server port"
+        );
     }
 }

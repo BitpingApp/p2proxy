@@ -5,7 +5,6 @@ use ratatui::{
 };
 
 use super::{ACCENT, BACKGROUND, BORDER, FOREGROUND, PRIMARY, SECONDARY, SUCCESS, Ui, WARN};
-use crate::CONFIG;
 use crate::tui::ui_state::{AddrSource, PeerAddr};
 
 impl Ui {
@@ -21,7 +20,7 @@ impl Ui {
     /// rest collapsed" so the tab is informative on first open without
     /// being overwhelming on configs with many servers.
     pub(crate) fn render_network_tab(&mut self, frame: &mut Frame<'_>, area: Rect) {
-        let servers: Vec<&'static models::config::Server> = CONFIG.servers.iter().collect();
+        let servers = self.config.servers.clone();
         if servers.is_empty() {
             let placeholder = Paragraph::new(Line::from(Span::styled(
                 "no servers configured — add entries to Config.yaml",
@@ -74,7 +73,7 @@ impl Ui {
         &self,
         frame: &mut Frame<'_>,
         area: Rect,
-        server: &'static models::config::Server,
+        server: &proxy_core::config::Server,
         is_selected: bool,
     ) {
         // Pinned servers render one status row per rank inside the header,
@@ -104,7 +103,7 @@ impl Ui {
         &self,
         frame: &mut Frame<'_>,
         area: Rect,
-        server: &'static models::config::Server,
+        server: &proxy_core::config::Server,
         is_selected: bool,
     ) {
         let active = self.state.active_destinations.get(&server.port);
@@ -170,7 +169,7 @@ impl Ui {
         &self,
         frame: &mut Frame<'_>,
         area: Rect,
-        server: &'static models::config::Server,
+        server: &proxy_core::config::Server,
         is_selected: bool,
     ) {
         // Filter summary line: country / min_bandwidth. `min_bandwidth`
@@ -234,11 +233,11 @@ impl Ui {
                 ];
                 if let Some(source) = self.state.destination_sources.get(&server.port) {
                     let badge = match source {
-                        models::events::DestinationSource::Pinned { rank } => {
+                        proxy_core::events::DestinationSource::Pinned { rank } => {
                             format!("pinned[{rank}]")
                         }
-                        models::events::DestinationSource::Sticky => "sticky".to_string(),
-                        models::events::DestinationSource::Discovered => "discovered".to_string(),
+                        proxy_core::events::DestinationSource::Sticky => "sticky".to_string(),
+                        proxy_core::events::DestinationSource::Discovered => "discovered".to_string(),
                     };
                     spans.push(Span::styled("  ·  ", Style::default().fg(BORDER)));
                     spans.push(Span::styled(badge, Style::default().fg(PRIMARY)));
@@ -355,7 +354,7 @@ impl Ui {
         &self,
         frame: &mut Frame<'_>,
         area: Rect,
-        server: &'static models::config::Server,
+        server: &proxy_core::config::Server,
     ) {
         let pool = self
             .state
