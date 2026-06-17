@@ -1,0 +1,30 @@
+[package]
+name = "p2proxy-core"
+version = "0.1.0"
+edition = "2024"
+license-file = "../../LICENSE"
+repository = "https://github.com/BitpingApp/p2proxy"
+description = "Pure domain core and port traits for p2proxy (no async runtime, no libp2p swarm, no globals)"
+
+[lib]
+name = "proxy_core"
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+futures.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+libp2p = { workspace = true, features = ["serde", "ed25519"] }
+p2p-bandwidth-protocol.workspace = true
+figment = { workspace = true, features = ["yaml"] }
+color-eyre.workspace = true
+serde_json.workspace = true
+human-bandwidth = { version = "0.1.3", features = ["serde"] }
+keshvar = { version = "0.5.0", features = [
+    "search-iso-short-name",
+    "search-iso-long-name",
+] }
+
+[features]
+testing = []
