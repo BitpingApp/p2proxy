@@ -13,6 +13,38 @@ Cargo workspace with two crates:
 - **`crates/p2proxy`** — single binary; proxy daemon + embedded ratatui TUI. The TUI runs in-process under `src/tui/`. `--no-ui` (or `NO_UI=true` env var) runs headless, which is the default in Docker.
 - **`crates/models`** — shared data models, config types, event types used by `p2proxy`.
 
+## Code Style & Conventions
+
+**Code documents itself; comments are the rare exception.** Prefer well-named
+functions, types, variables, files, and folder paths over comments. A comment
+exists *only* to capture a *why* that isn't apparent from reading the code — a
+non-obvious constraint, a protocol/ordering subtlety, a deliberate trade-off.
+Never restate *what* the code does, and never narrate *history* (`// was X`,
+`// replaces old Y`, `// previously…`, `// no longer needed`) — the diff and git
+history carry that story.
+
+**Names and structure are the documentation.** Functions, variables, types,
+files, and folder paths must be self-explanatory, so the module tree reads as the
+design (`runtime/network/classify.rs`, `ConnectPlan::next_action`,
+`send_session_error`). If something needs a comment to explain *what* it is,
+rename it instead.
+
+Other standing rules (shared with the monorepo-root CLAUDE.md):
+
+- No file over 1000 lines (target well under 600); `mod.rs` is a table of
+  contents, not a body — split by purpose into named files.
+- Never `.unwrap()`/`.expect()` in production code; use `?`, typed errors,
+  `ok_or`, `unwrap_or`, or pattern matching. Tests may panic.
+- Prefer typed `thiserror` enums over `anyhow`/`eyre` in libraries and reusable
+  code so callers can `matches!`; reserve `eyre` for the binary entry point.
+- Prefer message passing / actor-owned state / `ArcSwap` over `Mutex`/`RwLock`.
+- Prefer static dispatch (generics / associated types / RPITIT) over `Box<dyn>`;
+  async traits via `impl Future`, not `async_trait`.
+- Always invert conditionals: check errors and guard conditions first and
+  early-return on them explicitly (`?`, `return`, `continue`, `let ... else`).
+  The happy path comes last, at the function's base indentation — never nested
+  inside an `if`. Invert the condition instead of wrapping success in braces.
+
 ## Common Commands
 
 ### Building
