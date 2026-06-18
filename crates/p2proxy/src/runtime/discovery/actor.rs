@@ -6,11 +6,10 @@ use std::time::{Duration, Instant};
 use arc_swap::ArcSwap;
 use libp2p::{Multiaddr, PeerId};
 use proxy_core::config::Server;
-use proxy_core::domain::connect::{ConnectCtx, ConnectedDestination};
-use proxy_core::domain::connect::ConnectError;
+use proxy_core::domain::connect::{ConnectCtx, ConnectError, ConnectedDestination};
 use proxy_core::events::Events;
 use proxy_core::ports::{Actor, EventSink, StickyStore};
-use tracing::info;
+use tracing::{debug, info};
 
 use super::event::DiscoveryEvent;
 use crate::runtime::context::Context;
@@ -48,10 +47,12 @@ impl<S: StickyStore> DiscoveryActor<S> {
         match result {
             Ok(destination) => {
                 let peer = destination.peer;
+                debug!(port, %peer, source = ?destination.source, "discovery adopted exit peer");
                 self.set_destination(ctx, port, destination);
                 Some(peer)
             }
-            Err(_) => {
+            Err(e) => {
+                debug!(port, error = %e, "discovery found no usable peer");
                 self.clear_destination(ctx, port);
                 None
             }
@@ -77,6 +78,10 @@ impl<S: StickyStore> DiscoveryActor<S> {
             .map(|(port, _)| *port)
             .collect();
 
+        if !stale.is_empty() {
+            debug!(%peer, ports = ?stale, "active exit peer disconnected");
+        }
+
         for port in stale {
             let elapsed = self.last_rediscovery.get(&port).map(|at| at.elapsed());
             if let Some(elapsed) = elapsed
@@ -90,6 +95,11 @@ impl<S: StickyStore> DiscoveryActor<S> {
                 if self.pending_rediscovery.insert(port) {
                     let discovery = ctx.discovery.clone();
                     let remaining = REDISCOVERY_COOLDOWN - elapsed;
+                    debug!(
+                        port,
+                        remaining_ms = remaining.as_millis() as u64,
+                        "rediscovery throttled; scheduled after cooldown"
+                    );
                     tokio::spawn(async move {
                         tokio::time::sleep(remaining).await;
                         discovery.discover_for(port).await;
@@ -106,6 +116,7 @@ impl<S: StickyStore> DiscoveryActor<S> {
     /// reconnect can dial it straight. No-ops for a peer that isn't already a
     /// remembered exit (e.g. a hub we connect to for bootstrap/relay/discovery).
     fn promote_direct(&mut self, peer: PeerId, address: Multiaddr) {
+        debug!(%peer, %address, "recording observed direct address for exit");
         self.sticky.note_direct_address(peer, address);
     }
 
@@ -114,6 +125,7 @@ impl<S: StickyStore> DiscoveryActor<S> {
     /// so it's never re-adopted, then rediscover a real exit for any port it was
     /// serving (with no sticky-reconnect back to it).
     async fn handle_peer_unusable(&mut self, ctx: &Context, peer: PeerId) {
+        debug!(%peer, "peer cannot serve as an exit; dropping from all pools");
         let servers: Vec<Server> = ctx.config.servers.clone();
         for server in &servers {
             self.sticky.forget_peer(server.port, peer);

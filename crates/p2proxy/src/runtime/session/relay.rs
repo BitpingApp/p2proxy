@@ -16,7 +16,7 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, BufWriter};
 use tokio::net::TcpStream;
 use tokio::select;
 use tokio::time::timeout;
-use tracing::warn;
+use tracing::{debug, warn};
 use uuid::Uuid;
 
 use crate::adapters::channel_sink::ChannelSink;
@@ -47,6 +47,7 @@ pub async fn run_session(ctx: SessionContext, socket: TcpStream) {
         Some(peer) => peer,
         None => {
             counter!("p2proxy_socks_jit_discovery_total").increment(1);
+            debug!(port = ctx.port, "no active destination; running just-in-time discovery");
             match timeout(JIT_DISCOVERY_TIMEOUT, ctx.discovery.request_new_peer(ctx.port)).await {
                 Ok(Some(peer)) => peer,
                 _ => {
@@ -111,6 +112,7 @@ async fn handle_socks_connection(ctx: SessionContext, mut socket: TcpStream, pee
         Err(e) => return session_error("peer-connection", e),
     };
 
+    debug!(%session_id, %peer, "proxy session established");
     ctx.events.emit(Events::Session(SessionEvents::New(
         session_id, target, peer,
     )));
@@ -118,6 +120,12 @@ async fn handle_socks_connection(ctx: SessionContext, mut socket: TcpStream, pee
     gauge!("p2proxy_sessions_active").increment(1.0);
 
     let (outgoing, incoming) = relay(&ctx, &mut socket, &mut session, session_id).await;
+    debug!(
+        %session_id, %peer,
+        up_bytes = outgoing.bytes,
+        down_bytes = incoming.bytes,
+        "proxy session closing"
+    );
 
     let _ = session.close().await;
     gauge!("p2proxy_sessions_active").decrement(1.0);

@@ -7,10 +7,10 @@ use libp2p_stream as stream;
 use libp2p_stream::OpenStreamError;
 use metrics::{counter, histogram};
 use p2p_bandwidth_protocol::TCP_PROXY_PROTOCOL;
-use proxy_core::ports::StreamError;
-use proxy_core::ports::StreamOpener;
+use proxy_core::ports::{StreamError, StreamOpener};
 use tokio::sync::Semaphore;
 use tokio::time::{Instant, timeout};
+use tracing::debug;
 
 /// Opens proxy streams to destination peers, capping concurrent opens per peer.
 /// Not a connection pool — every call opens a fresh libp2p stream; the cap just
@@ -58,12 +58,18 @@ impl StreamOpener for PeerStreamManager {
             .await
         {
             Ok(Ok(stream)) => stream,
-            Ok(Err(e)) => return Err(map_open_error(peer, e)),
+            Ok(Err(e)) => {
+                let err = map_open_error(peer, e);
+                debug!(%peer, %err, "failed to open proxy stream");
+                return Err(err);
+            }
             Err(_) => return Err(StreamError::OpenTimeout { peer }),
         };
 
-        histogram!("p2proxy_stream_acquire_duration_seconds").record(start.elapsed().as_secs_f64());
+        let elapsed = start.elapsed();
+        histogram!("p2proxy_stream_acquire_duration_seconds").record(elapsed.as_secs_f64());
         counter!("p2proxy_stream_opened_total").increment(1);
+        debug!(%peer, elapsed_ms = elapsed.as_millis() as u64, "opened proxy stream to peer");
         Ok(stream)
     }
 
