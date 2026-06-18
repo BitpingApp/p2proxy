@@ -407,12 +407,7 @@ mod tests {
             ChannelSink::new(ev_tx),
         );
         let shutdown = CancellationToken::new();
-        tokio::spawn(drive_network(
-            NetworkActor::new(memory_swarm()),
-            net_rx,
-            ctx,
-            shutdown.clone(),
-        ));
+        tokio::spawn(NetworkActor::new(memory_swarm()).run(net_rx, ctx, shutdown.clone()));
 
         let net = NetworkHandle::new(net_tx);
         let target = listen_addr.with_p2p(peer_id).expect("with_p2p");
@@ -424,38 +419,40 @@ mod tests {
     }
 }
 
-/// The runtime's swarm driver: owns the swarm stream + command inbox and feeds
-/// each into `NetworkActor::handle`. This is the loop — the actor stays passive.
-pub async fn drive_network(
-    mut actor: NetworkActor,
-    mut commands: Receiver<NetworkCommand>,
-    ctx: Context,
-    shutdown: CancellationToken,
-) {
-    let mut expire = tokio::time::interval(Duration::from_secs(1));
-    expire.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut bootstrap = tokio::time::interval(Duration::from_secs(5));
-    bootstrap.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+impl NetworkActor {
+    /// Drive the swarm: own the swarm stream + command inbox and feed each into
+    /// `handle`. The loop lives here; `handle` stays passive.
+    pub async fn run(
+        mut self,
+        mut commands: Receiver<NetworkCommand>,
+        ctx: Context,
+        shutdown: CancellationToken,
+    ) {
+        let mut expire = tokio::time::interval(Duration::from_secs(1));
+        expire.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut bootstrap = tokio::time::interval(Duration::from_secs(5));
+        bootstrap.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-    let _ = actor.handle(&ctx, NetworkInput::RetryBootstrap).await;
+        let _ = self.handle(&ctx, NetworkInput::RetryBootstrap).await;
 
-    loop {
-        tokio::select! {
-            _ = shutdown.cancelled() => {
-                let _ = actor.handle(&ctx, NetworkInput::Shutdown).await;
-                return;
-            }
-            Some(event) = actor.swarm.next() => {
-                let _ = actor.handle(&ctx, NetworkInput::Swarm(event)).await;
-            }
-            Some(command) = commands.recv() => {
-                let _ = actor.handle(&ctx, NetworkInput::Command(command)).await;
-            }
-            _ = expire.tick() => {
-                let _ = actor.handle(&ctx, NetworkInput::ExpireDials).await;
-            }
-            _ = bootstrap.tick() => {
-                let _ = actor.handle(&ctx, NetworkInput::RetryBootstrap).await;
+        loop {
+            tokio::select! {
+                _ = shutdown.cancelled() => {
+                    let _ = self.handle(&ctx, NetworkInput::Shutdown).await;
+                    return;
+                }
+                Some(event) = self.swarm.next() => {
+                    let _ = self.handle(&ctx, NetworkInput::Swarm(event)).await;
+                }
+                Some(command) = commands.recv() => {
+                    let _ = self.handle(&ctx, NetworkInput::Command(command)).await;
+                }
+                _ = expire.tick() => {
+                    let _ = self.handle(&ctx, NetworkInput::ExpireDials).await;
+                }
+                _ = bootstrap.tick() => {
+                    let _ = self.handle(&ctx, NetworkInput::RetryBootstrap).await;
+                }
             }
         }
     }

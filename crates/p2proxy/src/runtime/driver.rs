@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::context::Context;
 use super::discovery::DiscoveryEvent;
-use super::network::{NetworkActor, NetworkCommand, drive_network};
+use super::network::{NetworkActor, NetworkCommand};
 
 /// Generic driver for a message-only actor: pull each input from the inbox and
 /// dispatch it to `handle` with the shared context. The dispatch lives here, in
@@ -44,8 +44,8 @@ pub async fn drive<A>(
 /// so the slot is generic over the [`Actor`] trait — drop in any actor whose
 /// input matches the inbox (an alternative strategy, a test double). The
 /// swarm-owning [`NetworkActor`] is the exception: it owns and polls the libp2p
-/// `Swarm`, so it needs the bespoke `drive_network` loop rather than the generic
-/// channel→handle pattern, and stays concrete.
+/// `Swarm`, so it runs its own bespoke `NetworkActor::run` loop rather than the
+/// generic channel→handle pattern, and stays concrete.
 pub struct Runtime;
 
 impl Runtime {
@@ -63,7 +63,7 @@ impl Runtime {
         let net_ctx = ctx.clone();
         let net_shutdown = shutdown.clone();
         tasks.spawn(async move {
-            drive_network(network, network_inbox, net_ctx, net_shutdown).await;
+            network.run(network_inbox, net_ctx, net_shutdown).await;
             Ok(())
         });
         tasks.spawn(async move {
