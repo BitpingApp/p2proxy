@@ -4,14 +4,16 @@ Guidance for [Claude Code](https://claude.com/claude-code) (and other AI coding 
 
 ## Project Overview
 
-p2proxy is a peer-to-peer SOCKS5 proxy daemon built on libp2p, written in Rust. It routes outbound traffic through the Bitping network of peer nodes rather than through a centralised proxy provider.
+p2proxy is a peer-to-peer SOCKS5 proxy daemon built on libp2p, written in Rust. It routes outbound traffic through the Bitping network of peer nodes rather than through a centralised proxy provider. An in-process ratatui TUI shows live status; `--no-ui` (or `NO_UI=true`, the default in Docker) runs headless.
 
 ## Workspace Structure
 
-Cargo workspace with two crates:
+Hexagonal (ports-and-adapters) with an actor runtime. Two crates:
 
-- **`crates/p2proxy`** — single binary; proxy daemon + embedded ratatui TUI. The TUI runs in-process under `src/tui/`. `--no-ui` (or `NO_UI=true` env var) runs headless, which is the default in Docker.
-- **`crates/models`** — shared data models, config types, event types used by `p2proxy`.
+- **`crates/core`** (package `p2proxy-core`, lib `proxy_core`) — the pure domain. Plain logic, value types, and the port traits. **No** `tokio` runtime, `libp2p-swarm`, `tonic`, `ratatui`, `metrics`, or globals — they aren't dependencies, so the core literally can't reach the outside. Holds `domain/` (`connect`, `selection`, `sticky`, `backoff`, `circuit`), `ports/` (the trait boundaries + each one's error type), `config`, `events`, and in-memory `testing` fakes.
+- **`crates/p2proxy`** — the binary. The only place the `Swarm`, gRPC, files, ratatui, and the tokio runtime appear. Holds the port **adapters** (`adapters/`), the **actors + runtime** (`runtime/`), the TUI (`tui/`), and the composition root (`main.rs`).
+
+See **[ARCHITECTURE.md](ARCHITECTURE.md)** for the ports/adapters diagram and the full mapping table.
 
 ## Code Style & Conventions
 
@@ -37,255 +39,110 @@ Other standing rules (shared with the monorepo-root CLAUDE.md):
   `ok_or`, `unwrap_or`, or pattern matching. Tests may panic.
 - Prefer typed `thiserror` enums over `anyhow`/`eyre` in libraries and reusable
   code so callers can `matches!`; reserve `eyre` for the binary entry point.
+- Keep each error type next to the trait that exposes it or the code that throws
+  it — not in a central `errors` module.
 - Prefer message passing / actor-owned state / `ArcSwap` over `Mutex`/`RwLock`.
 - Prefer static dispatch (generics / associated types / RPITIT) over `Box<dyn>`;
   async traits via `impl Future`, not `async_trait`.
+- A port earns its place only when there's something to *adapt* (a real backend
+  plus a fake, or genuine swap value). Otherwise keep the concrete type — the
+  crate boundary already gives the isolation.
 - Always invert conditionals: check errors and guard conditions first and
   early-return on them explicitly (`?`, `return`, `continue`, `let ... else`).
   The happy path comes last, at the function's base indentation — never nested
   inside an `if`. Invert the condition instead of wrapping success in braces.
 
-## Common Commands
-
-### Building
-```bash
-# Build the single binary
-cargo build --release -p p2proxy
-```
-
-### Running in Development
-```bash
-# Run with the TUI attached (default)
-cargo run -p p2proxy
-
-# Headless (e.g. under systemd / Docker)
-cargo run -p p2proxy -- --no-ui
-
-# Point at a Config.yaml outside the CWD
-cargo run -p p2proxy -- --config ~/.config/p2proxy/Config.yaml
-```
-
-### Testing
-
-Run all tests:
-```bash
-cargo test --all --verbose
-```
-
-Run specific test categories:
-```bash
-# Connection tests (P2P, SOCKS5, RPC) - 14 tests
-cargo test --test connection_tests
-
-# Disconnection tests (failures, cleanup) - 11 tests
-cargo test --test disconnection_tests
-
-# Throughput tests (basic bandwidth validation) - 3 tests
-cargo test --test throughput_tests
-
-# Stability tests (reconnection, failover) - 11 tests
-cargo test --test stability_tests
-```
-
-Run tests with logging:
-```bash
-RUST_LOG=debug cargo test test_name -- --nocapture
-RUST_LOG=trace cargo test -- --nocapture
-```
-
-### Test Suite Focus
-
-The test suite is simplified and focused on three critical areas:
-
-**✅ Connectivity** - Can nodes connect? (P2P, SOCKS5, RPC)
-**✅ Recoverability** - Do connections recover from failures? (exponential backoff, network partitions)
-**✅ Failover** - Does another connection kick in when one fails? (peer rotation)
-
-Total: **39 tests** (14 connection + 11 disconnection + 3 throughput + 11 stability)
-
-**Removed** overly complex tests for jitter/latency percentiles, chaos engineering, and long-running tests, since connection quality varies significantly by peer.
-
-### Benchmarks
-
-Run performance benchmarks:
-```bash
-# All benchmarks
-cargo bench
-
-# Specific benchmarks
-cargo bench --bench throughput_bench
-cargo bench --bench latency_bench
-
-# Compile only (for CI)
-cargo bench --no-run
-```
-
-View benchmark reports:
-```bash
-open target/criterion/report/index.html  # macOS
-xdg-open target/criterion/report/index.html  # Linux
-```
-
-### Docker
-```bash
-# Using Docker Compose
-docker-compose up -d
-docker-compose logs -f
-docker-compose down
-
-# Build and run locally
-docker build -t p2proxy .
-docker run -p 1080:1080 -p 45445:45445/udp p2proxy
-```
-
 ## Architecture
 
-### P2P Networking (`p2proxy/src/swarm.rs`)
+Dependencies point strictly inward. The binary depends on `proxy_core`;
+`proxy_core` depends on nothing external. Decision logic is pure and generic over
+the port traits; the binary supplies the real adapters, tests supply in-memory
+fakes.
 
-The core P2P functionality is built on libp2p with the following behaviors:
-- **libp2p-stream**: Stream multiplexing for SOCKS5 connections, plus the typed
-  request/notify protocols (FindNodes queries, bandwidth reports) that ride a
-  `LibP2pClient` over the stream `Control`
-- **dcutr**: Direct connection upgrade through relay
-- **relay client**: Connection relay when direct connection is not possible
-- **identify**: Peer identification protocol
+**Ports** (`core::ports`, RPITIT async + static dispatch): `PeerDirectory`,
+`Dialer`, `StreamOpener`, `StickyStore`, `Authenticator`, `Identity`, `Clock`,
+`EventSink`, plus the one `Actor` trait (`handle(&mut self, ctx, event)`).
 
-The swarm authenticates with the Bitping gRPC service (`grpc.bitping.com`) before establishing P2P connections.
+**Adapters** (`p2proxy::adapters`): `SwarmGateway` (`PeerDirectory`+`Dialer`),
+`PeerStreamManager` (`StreamOpener`), `FileStickyStore` (`StickyStore` →
+`sticky_peers.json`), `GrpcAuth` (`Authenticator` → `grpc.bitping.com`),
+`KeypairIdentity` (`Identity` → `node_keypair.bin`), `TokioClock`, `ChannelSink`
+(`EventSink` → TUI / Prometheus).
 
-### Proxy Protocols (`p2proxy/src/proxy_protocols/`)
+**Actors** (`p2proxy::runtime`): exactly two implement `Actor`, because they're
+the only single-owner-mutable-state holders —
+- `NetworkActor` owns the libp2p `Swarm` and runs its own bespoke loop,
+  `NetworkActor::run(self, …)`, polling the swarm stream + command inbox and
+  feeding each into `handle`.
+- `DiscoveryActor<S: StickyStore>` runs the pure `connect` flow, owns the sticky
+  store + per-port destination `ArcSwap`s, and reacts to peer close / unusable.
 
-Currently implements SOCKS5 proxy protocol with two implementations:
-- `socks.rs`: Standard SOCKS5 server
-- `socks_stream.rs`: Stream-based SOCKS5 for P2P connections
+`Runtime::spawn` wires them: the bespoke `NetworkActor::run` for the swarm owner,
+the generic `drive` for any channel-driven actor (the discovery slot is generic
+over the `Actor` trait). `SessionSupervisor` (one per listen port) is the SOCKS
+accept loop that spawns a per-connection relay task reading the destination
+`ArcSwap`; `PeerStreamManager` is a shared adapter — neither is an `Actor`, by
+design (streaming / shared-resource shaped, not message-handler shaped).
 
-### Configuration (`Config.yaml`)
+## Configuration (`Config.yaml`)
 
-The application reads configuration from `Config.yaml` with environment variable overrides. Key configuration includes:
-- `port`: UDP port for libp2p (default: 45445)
-- `log_level`: Logging verbosity (trace, debug, info, warn, error)
-- `servers`: Array of proxy server configurations with protocol, port, country filtering, and minimum bandwidth requirements
-- `bitping_api_key`: Authentication key for Bitping service (can be set via environment variable)
+YAML; environment variables override file values. Top-level: `bitping_api_key`
+(or the `BITPING_API_KEY` env var), `servers`, `listen_addrs` (host:port list;
+default `0.0.0.0:0` + `[::]:0`, any port), `metrics_port` (default 9000),
+`bootstrap_address`, `grpc_url`, `keypair_path`. Per-server: `protocol`
+(`Socks5`), `port`, `min_bandwidth` (default 50Mbps), `country`,
+`destination_peers` (ordered pinned list), `fallback_to_discovery`, `sticky`,
+`sticky_reconnect` (`with-backoff` | `fail-fast`), `pool { max_total,
+open_timeout_secs }`. Logging is controlled by `RUST_LOG` only — there is no
+`log_level` key. Full reference in [README.md](README.md).
 
-### Daemon ↔ TUI communication
+`node_keypair.bin` (libp2p identity) and `sticky_peers.json` (remembered exit
+pool, fingerprinted by `country`/`min_bandwidth`/port) are written relative to
+the CWD; run separate instances from separate working directories.
 
-The TUI runs **in-process** with the proxy daemon. Two `tokio::sync::mpsc` channels carry swarm events:
-
-1. `swarm_tx` (producer: `ProxyNetwork::drive_network`) → `handle_swarm_events` mutates the shared `ServerContainer`.
-2. `tui_tx` (re-emitted by `handle_swarm_events`) → `tui::Ui::run_ui` renders.
-
-When `--no-ui` is set, the TUI receiver is dropped immediately and `try_send` becomes a cheap no-op.
-
-### Key Dependencies
-
-- **libp2p 0.56**: P2P networking foundation
-- **tokio**: Async runtime
-- **socks5-impl**: SOCKS5 protocol implementation
-- **ratatui**: In-process terminal UI framework (skipped when `--no-ui`)
-- **tonic**: gRPC client for Bitping authentication
-- **prometheus**: Metrics exposed on port 9091
-
-### Metrics
-
-Prometheus metrics are exposed at `http://localhost:9091/metrics` and include connection statistics, bandwidth usage, and error rates.
-
-### Node Identity
-
-The application generates and persists a libp2p keypair in `node_keypair.bin` for consistent peer identity across restarts.
-
-### Sticky exit peers
-
-Discovery-driven servers (`sticky: true`, the default) persist their chosen exit peer in `sticky_peers.json` — same CWD convention as `node_keypair.bin` — so restarts re-use the same egress IP. Entries carry a fingerprint of the server's filters (`country`, `min_bandwidth`, port) and are invalidated when those change. See `src/sticky.rs` and `src/discovery/` (peer resolution + ordered pinned-peer connect, BIT-597).
-
-## Testing Infrastructure
-
-P2Proxy has a comprehensive test suite with the following structure:
-
-### Test Categories
-
-1. **Connection Tests** (`crates/p2proxy/tests/connection_tests.rs`)
-   - P2P connection establishment (direct and relay-mediated)
-   - SOCKS5 proxy functionality
-   - RPC communication between daemon and UI
-   - Multiple concurrent peer connections
-
-2. **Disconnection Tests** (`crates/p2proxy/tests/disconnection_tests.rs`)
-   - Graceful disconnection and cleanup
-   - Network failure handling
-   - Authentication failures
-   - Resource cleanup verification
-
-3. **Throughput Tests** (`crates/p2proxy/tests/throughput_tests.rs`)
-   - Bandwidth measurement accuracy (±1%)
-   - Single and concurrent session performance
-   - Hash verification for data integrity
-   - Performance targets (>80% of direct TCP)
-
-4. **Jitter Tests** (`crates/p2proxy/tests/jitter_tests.rs`)
-   - Round-trip time (RTT) measurement
-   - Latency percentiles (p50, p95, p99)
-   - Jitter analysis (RFC 3550)
-   - Performance targets (<100ms direct, <250ms relay)
-
-5. **Stability Tests** (`crates/p2proxy/tests/stability_tests.rs`)
-   - Long-running connection tests (24 hours, marked with `#[ignore]`)
-   - Memory leak detection
-   - Reconnection logic and exponential backoff
-   - Stress testing and resource exhaustion
-
-### Test Utilities
-
-The test suite includes reusable infrastructure in `crates/p2proxy/tests/common/`:
-- **fixtures.rs**: Test data generators, configurations, and keypairs
-- **test_utils.rs**: Helper functions for bandwidth/latency measurement
-- **mock_swarm.rs**: Mock libp2p Swarm for testing
-- **mock_peer.rs**: Mock peer nodes
-- **mock_relay.rs**: Mock relay servers
-
-### Benchmarks
-
-Performance benchmarks in `crates/p2proxy/benches/`:
-- **throughput_bench.rs**: Throughput measurements
-- **latency_bench.rs**: Latency measurements
-
-All benchmarks use the Criterion framework with statistical analysis.
-
-### CI Integration
-
-Tests run automatically on push and pull requests:
-
-**GitHub Actions** (`.github/workflows/test.yml`):
-- Matrix testing on Ubuntu and macOS
-- Cargo dependency caching for faster builds
-- Standard tests run in 3-8 minutes
-- Benchmark compilation (no execution in CI)
-- Optional weekly schedule for long-running tests
-
-**GitLab CI** (`.gitlab-ci.yml`):
-- Parallel test execution per category
-- Cargo caching for faster builds
-- Optional macOS runner support
-- Manual/scheduled long-running tests (48-hour timeout)
-- Lint and format checks
-- Release artifact generation
-
-### Documentation
-
-Comprehensive test documentation available at:
-- **crates/p2proxy/tests/README.md**: Complete testing guide
-- Includes troubleshooting, platform-specific issues, and contribution guidelines
-
-## Release Process
-
-The project uses `cargo-dist` for automated releases configured in `dist-workspace.toml`. The GitHub Actions workflow (`.github/workflows/release.yml`) automatically builds binaries for all platforms when a git tag is pushed:
+## Common Commands
 
 ```bash
-git tag v1.0.0
-git push origin v1.0.0
+cargo build --release -p p2proxy            # build the binary
+cargo run -p p2proxy                         # run with the TUI
+cargo run -p p2proxy -- --no-ui              # headless
+cargo run -p p2proxy -- --config path.yaml   # config outside CWD
+cargo fmt --all && cargo clippy --all
 ```
 
-This triggers builds for:
-- Linux (x86_64, ARM64)
-- macOS (x86_64, ARM64)
-- Windows (x86_64)
-- Docker images published to Docker Hub
-- Homebrew formula updates
+## Testing
+
+Real production code against in-memory fakes — no mock-to-mock.
+
+```bash
+cargo test -p p2proxy-core # fast pure-domain suite: connect, selection, sticky,
+                           # backoff, circuit, per-port error conversions
+cargo test -p p2proxy      # adapters + actors over an in-memory libp2p
+                           # MemoryTransport swarm + a loopback SOCKS socket
+```
+
+The data-relay loop, bootstrap, and `PeerStreamManager::open` are validated by a
+live smoke run (`curl --socks5-hostname localhost:1080 https://ifconfig.me`
+returns a peer's egress IP), not unit-covered — `ProxySession` holds a concrete
+libp2p `Stream` that can't be faked without a full stream pair.
+
+## Metrics
+
+Prometheus on `0.0.0.0:<metrics_port>` (default `:9000`). Useful series:
+`p2proxy_peers_connected`, `p2proxy_sessions_active`,
+`p2proxy_socks_connections_total`, `p2proxy_upload_bytes_total` /
+`p2proxy_download_bytes_total`, `p2proxy_session_errors_total{stage}`,
+`p2proxy_stream_opened_total`, `p2proxy_ping_rtt_seconds`. Full list in README.
+
+## Release
+
+p2proxy is built and released by the **monorepo GitLab CI**, not from this
+directory. Trigger via GitLab UI → Run pipeline with
+`P2PROXY_RELEASE_VERSION=X.Y.Z` (semver, no `v`; append `-rcN` for a prerelease).
+The pipeline bumps `crates/p2proxy/Cargo.toml`, refreshes the lock, subtree-pushes
+`customer/p2proxy/` → `github.com/BitpingApp/p2proxy`, cross-compiles macOS +
+Linux × x86_64 + aarch64, and publishes a GitHub Release. Pipeline config lives at
+`customer/.release/p2proxy.gitlab-ci.yml` + `customer/.shared-ci.yml`; full
+details are in the monorepo-root CLAUDE.md under "Releasing a customer app". Do
+**not** build releases from this directory — the workspace path deps need the
+full monorepo.
