@@ -78,6 +78,11 @@ pub struct UIState {
     /// wholesale each discovery so filtered-out peers drop off.
     pub server_pools: HashMap<u16, Vec<PeerId>>,
 
+    /// Remembered sticky standby pool per server (from `sticky_peers.json`),
+    /// surfaced so the NETWORK tab shows every remembered exit, not just the
+    /// active one. Replaced wholesale each discovery pass.
+    pub sticky_pools: HashMap<u16, Vec<PeerId>>,
+
     /// Currently-selected destination peer per server, in lock-step with the
     /// swarm-side `ArcSwap` via `Events::ActiveDestination`.
     pub active_destinations: HashMap<u16, PeerId>,
@@ -115,6 +120,7 @@ impl UIState {
             download_graph: Vec::with_capacity(1000),
             last_error: None,
             server_pools: HashMap::new(),
+            sticky_pools: HashMap::new(),
             active_destinations: HashMap::new(),
             destination_sources: HashMap::new(),
             pinned_statuses: HashMap::new(),

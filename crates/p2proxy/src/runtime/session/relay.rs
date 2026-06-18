@@ -93,8 +93,8 @@ async fn handle_socks_connection(ctx: SessionContext, mut socket: TcpStream, pee
         Err(e) => {
             counter!("p2proxy_stream_acquire_failed_total").increment(1);
             if e.is_terminal_for_peer() {
-                warn!(%peer, %e, "peer unusable — forcing rediscovery");
-                ctx.discovery.peer_closed(peer).await;
+                warn!(%peer, %e, "peer can't proxy — forgetting it and rediscovering");
+                ctx.discovery.peer_unusable(peer).await;
             }
             let response = Response::new(Reply::GeneralFailure, Address::unspecified());
             let _ = response.write_to_async_stream(&mut socket).await;

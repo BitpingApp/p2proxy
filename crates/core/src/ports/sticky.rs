@@ -16,20 +16,9 @@ pub trait StickyStore {
     /// changed which peer is at the front.
     fn remember(&mut self, port: u16, fingerprint: &str, peer: PeerId, max: usize) -> bool;
 
-    /// Promote a directly-connected `peer` with its real `address`, evicting a
-    /// relay-only standby if the pool is full. Returns `true` when the pool
-    /// changed.
-    fn promote_connected(
-        &mut self,
-        port: u16,
-        fingerprint: &str,
-        peer: PeerId,
-        address: Multiaddr,
-        max: usize,
-    ) -> bool;
-
     /// Record the direct address observed for `peer` in whatever pool(s) it
-    /// belongs to.
+    /// already belongs to. Never adds a peer — a directly-connected peer that
+    /// was never adopted as an exit (e.g. a hub) must not enter the pool.
     fn note_direct_address(&mut self, peer: PeerId, address: Multiaddr);
 
     /// Drop one peer from `port`'s pool after it failed to reconnect.

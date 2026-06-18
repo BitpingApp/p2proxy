@@ -5,6 +5,7 @@ use chrono::{DateTime, Utc};
 use libp2p::{Multiaddr, PeerId};
 use proxy_core::domain::sticky::{StickyPeer, StickyPool, StickyState};
 use proxy_core::errors::StickyStoreError;
+use proxy_core::events::PoolPeer;
 use proxy_core::ports::StickyStore;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
@@ -79,6 +80,26 @@ impl FileStickyStore {
             warn!(?e, "failed to persist sticky store");
         }
     }
+
+    /// Snapshot the remembered pool for the NETWORK tab: every standby peer
+    /// with its stored direct address (if any). Read-only — unlike `pool()` it
+    /// never invalidates the pool on a fingerprint mismatch.
+    pub fn snapshot(&self, port: u16, fingerprint: &str) -> Vec<PoolPeer> {
+        self.state
+            .pools()
+            .get(&port)
+            .filter(|pool| pool.fingerprint == fingerprint)
+            .map(|pool| {
+                pool.peers
+                    .iter()
+                    .map(|p| PoolPeer {
+                        peer_id: p.peer_id,
+                        addresses: p.address.clone().into_iter().collect(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }
 
 impl StickyStore for FileStickyStore {
@@ -95,23 +116,6 @@ impl StickyStore for FileStickyStore {
     fn remember(&mut self, port: u16, fingerprint: &str, peer: PeerId, max: usize) -> bool {
         let changed = self.state.remember(port, fingerprint, peer, max);
         self.save_best_effort();
-        changed
-    }
-
-    fn promote_connected(
-        &mut self,
-        port: u16,
-        fingerprint: &str,
-        peer: PeerId,
-        address: Multiaddr,
-        max: usize,
-    ) -> bool {
-        let changed = self
-            .state
-            .promote_connected(port, fingerprint, peer, address, max);
-        if changed {
-            self.save_best_effort();
-        }
         changed
     }
 

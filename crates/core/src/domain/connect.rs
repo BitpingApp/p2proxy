@@ -6,7 +6,7 @@ use libp2p::{Multiaddr, PeerId};
 use crate::config::{DestinationPeerEntry, Server, StickyReconnect};
 use crate::domain::backoff::Backoff;
 use crate::domain::circuit::synthesize_circuit;
-use crate::domain::selection::{candidate_routes, partition_direct_first};
+use crate::domain::selection::candidate_routes;
 use crate::errors::{ConnectError, DirectoryError};
 use crate::events::{DestinationSource, Events, PinnedPeerStatus};
 use crate::ports::{Clock, Dialer, EventSink, PeerDirectory, StickyStore};
@@ -245,28 +245,27 @@ where
         None
     }
 
-    /// One reconnect attempt for a known peer: its remembered direct address
-    /// first, then the hub's current route, dialing direct before circuits.
+    /// One reconnect attempt for a known peer. Its remembered direct address,
+    /// the hub's current routes, and (when the hub can't answer) a synthesized
+    /// relay circuit are dialed together in a single race. A stale remembered
+    /// address — which a DCUtR reconnect produces every time it rotates the
+    /// peer's port — then loses the race instead of blocking a fresh route
+    /// behind the whole dial timeout.
     async fn try_reach_peer(&mut self, server: &Server, peer: PeerId) -> Option<PeerId> {
+        let mut routes: HashSet<Multiaddr> = HashSet::new();
         if let Some(direct) = self.sticky.direct_address(server.port, peer)
             && let Ok(tagged) = direct.with_p2p(peer)
-            && let Some(reached) = self.dial(HashSet::from([tagged])).await
         {
-            return Some(reached);
+            routes.insert(tagged);
         }
-
         let resolved = self.resolve_routes(&[peer]).await;
-        let routes: Vec<Multiaddr> = resolved.into_values().flatten().collect();
-        let (direct, circuit) = partition_direct_first(routes);
-        for group in [direct, circuit] {
-            if group.is_empty() {
-                continue;
-            }
-            if let Some(reached) = self.dial(group.into_iter().collect()).await {
-                return Some(reached);
-            }
+        routes.extend(resolved.into_values().flatten());
+        if routes.is_empty()
+            && let Some(circuit) = synthesize_circuit(self.relay_address, peer)
+        {
+            routes.insert(circuit);
         }
-        None
+        self.dial(routes).await
     }
 
     /// Resolve peer ids to current routes, falling back to circuit synthesis
@@ -418,7 +417,29 @@ mod tests {
     }
 
     #[test]
-    fn sticky_pool_direct_address_skips_the_hub() {
+    fn sticky_pool_falls_back_to_relay_circuit_on_transient_hub_failure() {
+        // A remembered peer with no stored direct address, and the hub can't
+        // resolve a route this pass (transient). Before the fix this dropped the
+        // peer and fell through to discovery; now it synthesizes a relay circuit
+        // and reconnects to the same exit.
+        let p = peer();
+        let server = discovery_server(1080);
+        let fp = server.peer_options.filter_fingerprint(1080);
+        let mut sticky = StickyState::default();
+        sticky.remember(1080, &fp, p, 5);
+        let dir = FakeDirectory::new();
+        let dl = FakeDialer::reachable([p]);
+        let (clk, sink, relay) = (FakeClock::new(), RecordingSink::new(), relay_addr());
+
+        let dest = run(&server, None, &dir, &dl, &clk, &sink, &mut sticky, &relay)
+            .expect("reconnects via synthesized relay circuit");
+        assert_eq!(dest.peer, p);
+        assert_eq!(dest.source, DestinationSource::Sticky);
+        assert_eq!(dir.find_calls(), 0, "never fell through to discovery");
+    }
+
+    #[test]
+    fn sticky_pool_reconnects_using_remembered_direct_address() {
         let p = peer();
         let server = discovery_server(1080);
         let fp = server.peer_options.filter_fingerprint(1080);
@@ -432,8 +453,33 @@ mod tests {
         let dest = run(&server, None, &dir, &dl, &clk, &sink, &mut sticky, &relay).expect("connects");
         assert_eq!(dest.peer, p);
         assert_eq!(dest.source, DestinationSource::Sticky);
-        assert_eq!(dir.find_calls(), 0, "direct address needs no discovery");
-        assert_eq!(dir.resolve_calls(), 0, "direct address needs no resolve");
+        assert_eq!(dir.find_calls(), 0, "remembered peer needs no discovery");
+        assert_eq!(dl.dial_count(), 1, "remembered + hub routes raced in one dial");
+    }
+
+    #[test]
+    fn stale_remembered_direct_does_not_block_a_fresh_route() {
+        // The remembered direct address is dead (a DCUtR reconnect rotated the
+        // peer's port), but the hub has a fresh route. The reconnect must land
+        // on the fresh route in a single dial — never serially behind the stale
+        // address's full dial timeout (the ~10s reconnect stall).
+        let p = peer();
+        let server = discovery_server(1080);
+        let fp = server.peer_options.filter_fingerprint(1080);
+        let stale: Multiaddr = format!("/ip4/203.0.113.7/tcp/9/p2p/{p}").parse().expect("addr");
+        let fresh = direct_addr(p);
+        let mut sticky = StickyState::default();
+        sticky.remember(1080, &fp, p, 5);
+        sticky.note_direct_address(p, stale.clone());
+        let dir = FakeDirectory::new().with_resolved(HashMap::from([(p, vec![fresh.clone()])]));
+        let dl = FakeDialer::reachable_addresses([fresh]);
+        let (clk, sink, relay) = (FakeClock::new(), RecordingSink::new(), relay_addr());
+
+        let dest = run(&server, None, &dir, &dl, &clk, &sink, &mut sticky, &relay)
+            .expect("reconnects on the fresh route despite the stale remembered address");
+        assert_eq!(dest.peer, p);
+        assert_eq!(dest.source, DestinationSource::Sticky);
+        assert_eq!(dl.dial_count(), 1, "stale + fresh raced in one dial, not serially");
     }
 
     #[test]

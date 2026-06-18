@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use libp2p::{Multiaddr, PeerId};
 
-use crate::domain::selection::destination_peer_ids;
+use crate::domain::selection::{destination_peer_ids, last_p2p};
 use crate::errors::{DialError, DirectoryError};
 use crate::events::{Events, PoolPeer};
 use crate::ports::{Clock, Dialer, EventSink, PeerDirectory};
@@ -78,10 +78,13 @@ impl PeerDirectory for FakeDirectory {
     }
 }
 
-/// Dialer that connects any address whose destination peer is in `reachable`.
+/// Dialer that connects any address whose destination peer is in `reachable`,
+/// or — when `reachable_addrs` is set — only the exact addresses listed (so a
+/// stale address can be modelled as dead while the peer is reachable elsewhere).
 #[derive(Default)]
 pub struct FakeDialer {
     reachable: Mutex<HashSet<PeerId>>,
+    reachable_addrs: Mutex<Option<HashSet<Multiaddr>>>,
     connected: Mutex<HashSet<PeerId>>,
     dialed: Mutex<Vec<HashSet<Multiaddr>>>,
 }
@@ -97,6 +100,14 @@ impl FakeDialer {
         d
     }
 
+    /// Only these exact addresses connect — used to model a stale remembered
+    /// address that no longer resolves while a fresh route does.
+    pub fn reachable_addresses(addrs: impl IntoIterator<Item = Multiaddr>) -> Self {
+        let d = Self::default();
+        *d.reachable_addrs.lock().expect("lock") = Some(addrs.into_iter().collect());
+        d
+    }
+
     pub fn dial_count(&self) -> usize {
         self.dialed.lock().expect("lock").len()
     }
@@ -108,6 +119,16 @@ impl Dialer for FakeDialer {
         addresses: HashSet<Multiaddr>,
     ) -> Result<Option<PeerId>, DialError> {
         self.dialed.lock().expect("lock").push(addresses.clone());
+        if let Some(addrs) = self.reachable_addrs.lock().expect("lock").as_ref() {
+            let hit = addresses
+                .iter()
+                .find(|a| addrs.contains(*a))
+                .and_then(last_p2p);
+            if let Some(p) = hit {
+                self.connected.lock().expect("lock").insert(p);
+            }
+            return Ok(hit);
+        }
         let reachable = self.reachable.lock().expect("lock");
         let hit = destination_peer_ids(&addresses)
             .into_iter()

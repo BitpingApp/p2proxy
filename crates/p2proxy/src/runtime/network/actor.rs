@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::time::Duration;
 
@@ -17,7 +17,7 @@ use tokio::sync::mpsc::Receiver;
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use super::behaviour::{Behaviour, BehaviourEvent};
 use super::command::NetworkCommand;
@@ -25,6 +25,11 @@ use crate::runtime::context::Context;
 
 const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
 const HUB_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
+/// Consecutive ping failures tolerated before tearing a connection down. One
+/// missed ping is a transient blip (a dropped UDP packet on an idle NAT path);
+/// disconnecting on it forces a needless reconnect. We only give up once a peer
+/// is unreachable across several pings.
+const MAX_PING_STRIKES: u32 = 3;
 
 struct PendingDial {
     candidates: HashSet<PeerId>,
@@ -51,6 +56,7 @@ pub struct NetworkActor {
     pending_dials: Vec<PendingDial>,
     bootstrap_connected: bool,
     bootstrap_dialing: bool,
+    ping_strikes: HashMap<PeerId, u32>,
 }
 
 impl NetworkActor {
@@ -60,6 +66,7 @@ impl NetworkActor {
             pending_dials: Vec::new(),
             bootstrap_connected: true,
             bootstrap_dialing: false,
+            ping_strikes: HashMap::new(),
         }
     }
 
@@ -218,8 +225,10 @@ impl NetworkActor {
                     });
                 }
             }
-            SwarmEvent::ConnectionClosed { peer_id, .. } => {
+            SwarmEvent::ConnectionClosed { peer_id, cause, .. } => {
                 gauge!("p2proxy_peers_connected").decrement(1.0);
+                self.ping_strikes.remove(&peer_id);
+                info!(%peer_id, ?cause, "connection closed");
                 if peer_id == ctx.bootstrap_peer_id {
                     self.bootstrap_connected = false;
                     self.bootstrap_dialing = false;
@@ -242,14 +251,22 @@ impl NetworkActor {
                 ..
             })) => {
                 counter!("p2proxy_ping_failures_total", "peer" => peer.to_string()).increment(1);
-                warn!(%peer, ?failure, "ping failure — disconnecting peer");
-                let _ = self.swarm.disconnect_peer_id(peer);
+                let strikes = self.ping_strikes.entry(peer).or_insert(0);
+                *strikes += 1;
+                if *strikes < MAX_PING_STRIKES {
+                    warn!(%peer, ?failure, strikes = *strikes, "ping failure — tolerating transient blip");
+                } else {
+                    warn!(%peer, ?failure, strikes = *strikes, "ping failed repeatedly — disconnecting peer");
+                    self.ping_strikes.remove(&peer);
+                    let _ = self.swarm.disconnect_peer_id(peer);
+                }
             }
             SwarmEvent::Behaviour(BehaviourEvent::Ping(ping::Event {
                 peer,
                 result: Ok(rtt),
                 ..
             })) => {
+                self.ping_strikes.remove(&peer);
                 histogram!("p2proxy_ping_rtt_seconds", "peer" => peer.to_string())
                     .record(rtt.as_secs_f64());
             }
@@ -316,6 +333,7 @@ impl NetworkActor {
 
     async fn graceful_shutdown(&mut self) {
         let peers: Vec<PeerId> = self.swarm.connected_peers().copied().collect();
+        info!(count = peers.len(), "disconnecting peers");
         for peer in peers {
             let _ = self.swarm.disconnect_peer_id(peer);
         }

@@ -24,12 +24,12 @@ use crate::runtime::stream_manager::PeerStreamManager;
 pub fn test_config() -> Arc<Config> {
     Arc::new(Config {
         servers: vec![discovery_server(1080)],
-        port: 45445,
+        listen_addrs: vec!["0.0.0.0:0".parse().expect("addr")],
         bitping_api_key: "test-key".into(),
-        bootstrap: "/dnsaddr/boot2.bitping.com".parse().expect("addr"),
+        bootstrap_address: "/dnsaddr/boot2.bitping.com".parse().expect("addr"),
         grpc_url: "https://grpc.bitping.com".into(),
         keypair_path: "node_keypair.bin".into(),
-        metrics_addr: "127.0.0.1:9091".parse().expect("addr"),
+        metrics_port: 9091,
     })
 }
 

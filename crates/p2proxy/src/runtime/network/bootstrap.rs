@@ -6,6 +6,7 @@ use libp2p::multiaddr::{self, Protocol};
 use libp2p::swarm::SwarmEvent;
 use libp2p::{Multiaddr, PeerId, Swarm, identify, noise, relay, tcp, yamux};
 use p2p_protocol::client::LibP2pClient;
+use proxy_core::config::Config;
 use proxy_core::events::{ConnectionEvents, Events};
 use tokio::sync::mpsc::Sender;
 use tracing::{info, warn};
@@ -29,8 +30,7 @@ pub struct Bootstrapped {
 
 pub async fn bootstrap(
     keypair: Keypair,
-    listen_port: u16,
-    bootstrap_address: Multiaddr,
+    config: &Config,
     events: &Sender<Events>,
 ) -> Result<Bootstrapped> {
     let mut swarm = libp2p::SwarmBuilder::with_existing_identity(keypair)
@@ -48,24 +48,48 @@ pub async fn bootstrap(
         .with_dns()?
         .with_relay_client(noise::Config::new, yamux::Config::default)?
         .with_behaviour(|k, relay_client| Behaviour::new(k.public(), relay_client))?
-        .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_secs(u64::MAX)))
+        .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_secs(300)))
         .build();
 
     let _ = events
         .send(Events::LocalPeerId(*swarm.local_peer_id()))
         .await;
 
-    for addr in listen_addresses(listen_port) {
-        swarm.listen_on(addr.clone())?;
-        swarm.add_external_address(addr);
+    let multiaddrs = config
+        .listen_addrs
+        .clone()
+        .into_iter()
+        .flat_map(|addr| match addr {
+            std::net::SocketAddr::V4(socket_addr_v4) => [
+                multiaddr::multiaddr!(Ip4(*socket_addr_v4.ip()), Tcp(socket_addr_v4.port())),
+                multiaddr::multiaddr!(
+                    Ip4(*socket_addr_v4.ip()),
+                    Udp(socket_addr_v4.port()),
+                    QuicV1
+                ),
+            ],
+            std::net::SocketAddr::V6(socket_addr_v6) => [
+                multiaddr::multiaddr!(Ip6(*socket_addr_v6.ip()), Tcp(socket_addr_v6.port())),
+                multiaddr::multiaddr!(
+                    Ip6(*socket_addr_v6.ip()),
+                    Udp(socket_addr_v6.port()),
+                    QuicV1
+                ),
+            ],
+        })
+        .collect::<Vec<Multiaddr>>();
+
+    for multiaddr in multiaddrs {
+        swarm.listen_on(multiaddr.clone())?;
+        swarm.add_external_address(multiaddr);
     }
 
     let _ = events
         .send(Events::Connection(ConnectionEvents::Connecting))
         .await;
 
-    info!(%bootstrap_address, "bootstrap hub multiaddr");
-    let bootstrap_peer_id = dial_bootstrap(&mut swarm, &bootstrap_address).await?;
+    info!(%config.bootstrap_address, "bootstrap hub multiaddr");
+    let bootstrap_peer_id = dial_bootstrap(&mut swarm, &config.bootstrap_address).await?;
 
     info!("waiting for relay reservation");
     let relay_peer_id = swarm
@@ -78,16 +102,21 @@ pub async fn bootstrap(
         .await;
 
     let _ = events
-        .send(Events::Connection(ConnectionEvents::Connected(relay_peer_id)))
+        .send(Events::Connection(ConnectionEvents::Connected(
+            relay_peer_id,
+        )))
         .await;
     info!(%relay_peer_id, "reservation accepted");
 
-    let Ok(relay_address) = bootstrap_address.clone().with_p2p(bootstrap_peer_id) else {
+    let Ok(relay_address) = config.bootstrap_address.clone().with_p2p(bootstrap_peer_id) else {
         bail!("could not construct relay multiaddr");
     };
 
     let stream_control = swarm.behaviour().stream.new_control();
-    let client = LibP2pClient::new(swarm.behaviour().stream.new_control(), *swarm.local_peer_id());
+    let client = LibP2pClient::new(
+        swarm.behaviour().stream.new_control(),
+        *swarm.local_peer_id(),
+    );
 
     Ok(Bootstrapped {
         swarm,
@@ -95,18 +124,9 @@ pub async fn bootstrap(
         stream_control,
         relay_peer_id,
         relay_address,
-        bootstrap_address,
+        bootstrap_address: config.bootstrap_address.clone(),
         bootstrap_peer_id,
     })
-}
-
-fn listen_addresses(port: u16) -> [Multiaddr; 4] {
-    [
-        multiaddr::multiaddr!(Ip4([0, 0, 0, 0]), Tcp(port)),
-        multiaddr::multiaddr!(Ip4([0, 0, 0, 0]), Udp(port), QuicV1),
-        multiaddr::multiaddr!(Ip6([0, 0, 0, 0, 0, 0, 0, 0]), Tcp(port)),
-        multiaddr::multiaddr!(Ip6([0, 0, 0, 0, 0, 0, 0, 0]), Udp(port), QuicV1),
-    ]
 }
 
 async fn dial_bootstrap(swarm: &mut Swarm<Behaviour>, bootstrap: &Multiaddr) -> Result<PeerId> {
@@ -159,7 +179,9 @@ async fn dial_bootstrap(swarm: &mut Swarm<Behaviour>, bootstrap: &Multiaddr) -> 
                 warn!("bootstrap connection timeout");
                 retries += 1;
                 if retries > MAX_BOOTSTRAP_RETRIES {
-                    bail!("failed to connect to bootstrap server after {MAX_BOOTSTRAP_RETRIES} attempts");
+                    bail!(
+                        "failed to connect to bootstrap server after {MAX_BOOTSTRAP_RETRIES} attempts"
+                    );
                 }
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }

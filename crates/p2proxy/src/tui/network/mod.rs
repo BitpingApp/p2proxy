@@ -356,12 +356,19 @@ impl Ui {
         area: Rect,
         server: &proxy_core::config::Server,
     ) {
-        let pool = self
+        let mut pool = self
             .state
             .server_pools
             .get(&server.port)
             .cloned()
             .unwrap_or_default();
+        // Surface every remembered sticky exit, not just the active one or the
+        // peers in the latest FindNodes set.
+        for peer in self.state.sticky_pools.get(&server.port).into_iter().flatten() {
+            if !pool.contains(peer) {
+                pool.push(*peer);
+            }
+        }
 
         let active = self.state.active_destinations.get(&server.port).copied();
 

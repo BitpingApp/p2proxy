@@ -1,4 +1,4 @@
-use std::{borrow::Cow, fmt::Display, net::SocketAddr, str::FromStr};
+use std::{borrow::Cow, fmt::Display, net::{SocketAddr}, str::FromStr};
 
 use color_eyre::eyre;
 use figment::{
@@ -13,7 +13,8 @@ use thiserror::Error;
 #[derive(Deserialize, Debug)]
 pub struct Config {
     pub servers: Vec<Server>,
-    pub port: u16,
+    #[serde(default = "default_listen_addrs")]
+    pub listen_addrs: Vec<SocketAddr>,
     pub bitping_api_key: Cow<'static, str>,
     /// libp2p multiaddr of the bootstrap hub. Defaults to Bitping's
     /// production hub (`/dnsaddr/boot2.bitping.com`), which is what every
@@ -21,7 +22,7 @@ pub struct Config {
     /// self-hosted hub testing — e.g. `/ip4/10.0.0.5/tcp/45445` or
     /// `/dnsaddr/boot-staging.example.com`.
     #[serde(default = "default_bootstrap")]
-    pub bootstrap: Multiaddr,
+    pub bootstrap_address: Multiaddr,
     /// gRPC endpoint of the Bitping auth service. Override for staging or a
     /// self-hosted hub.
     #[serde(default = "default_grpc_url")]
@@ -32,8 +33,8 @@ pub struct Config {
     /// Address the Prometheus metrics endpoint binds to. Defaults to localhost
     /// so metrics aren't exposed on every interface; set e.g. `0.0.0.0:9091` to
     /// scrape from another host (Docker, a sidecar).
-    #[serde(default = "default_metrics_addr")]
-    pub metrics_addr: SocketAddr,
+    #[serde(default = "default_metrics_port")]
+    pub metrics_port: u16,
 }
 
 fn default_bootstrap() -> Multiaddr {
@@ -50,8 +51,15 @@ fn default_keypair_path() -> String {
     "node_keypair.bin".to_string()
 }
 
-fn default_metrics_addr() -> SocketAddr {
-    SocketAddr::from(([127, 0, 0, 1], 9091))
+fn default_metrics_port() -> u16 {
+    9000
+}
+
+fn default_listen_addrs() -> Vec<SocketAddr> {
+    [
+        SocketAddr::from(([0, 0, 0, 0], 0)),
+        SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 0], 0)),
+    ].to_vec()
 }
 
 impl Config {
@@ -66,6 +74,14 @@ impl Config {
             .next()
             .unwrap_or_default()
             .to_string()
+    }
+
+    pub fn metrics_addr(&self) -> SocketAddr {
+        self.listen_addrs.first().map_or_else(|| SocketAddr::from(([0, 0, 0, 0], 9000)), |x|  {
+            let mut addr = x.clone();
+            addr.set_port(self.metrics_port);
+            addr
+        })
     }
 }
 
@@ -574,12 +590,12 @@ mod defaults_tests {
     fn config_with_grpc(url: &str) -> Config {
         Config {
             servers: vec![],
-            port: 45445,
+            listen_addrs: default_listen_addrs(),
             bitping_api_key: "".into(),
-            bootstrap: default_bootstrap(),
+            bootstrap_address: default_bootstrap(),
             grpc_url: url.into(),
             keypair_path: default_keypair_path(),
-            metrics_addr: default_metrics_addr(),
+            metrics_port: default_metrics_port(),
         }
     }
 
@@ -593,7 +609,8 @@ mod defaults_tests {
                 .to_string()
                 .contains("boot2.bitping.com")
         );
-        assert_eq!(default_metrics_addr().to_string(), "127.0.0.1:9091");
+        assert!(!default_listen_addrs().is_empty());
+        assert_eq!(default_metrics_port(), 9000);
         assert_eq!(default_keypair_path(), "node_keypair.bin");
         assert_eq!(default_grpc_url(), "https://grpc.bitping.com");
     }

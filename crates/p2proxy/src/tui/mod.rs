@@ -15,7 +15,7 @@ use proxy_core::events::Events;
 use std::sync::Arc;
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Tabs},
+    widgets::{Block, Borders, Paragraph, Tabs},
 };
 use std::{
     io,
@@ -117,14 +117,9 @@ impl Ui {
         self.needs_render = false;
     }
 
-    pub fn start_animation(&mut self) {
-        self.animation_start = Instant::now();
-        self.is_animating = true;
-    }
-
     pub fn toggle_logs(&mut self) {
         self.show_logs = !self.show_logs;
-        self.start_animation()
+        self.mark_dirty();
     }
 
     /// The logs are scrollable when the LOGS tab is selected or the logs
@@ -235,7 +230,13 @@ impl Ui {
                 _ = shutdown.cancelled() => {
                     break;
                 }
-                _ = idle_interval.tick(), if !ui.is_animating => {
+                // 10fps repaint heartbeat — drives animations and the
+                // bandwidth chart's seconds-ago axis even when no swarm event
+                // or keystroke arrives. Always on: gating it on `is_animating`
+                // froze every animation (the flag is set at startup and never
+                // cleared, so the tick never fired and a started animation
+                // hung on its first frame until the next keypress).
+                _ = idle_interval.tick() => {
                     ui.mark_dirty();
                 },
                 Some(event) = state_events.recv() => ui.handle_swarm_events(event),
@@ -286,10 +287,8 @@ impl Ui {
                                 break;
                             },
                             KeyCode::Char('e') | KeyCode::Char('E') => {
-                                // Open the shared export modal. Default
-                                // path is `~/p2proxy-logs-<ts>.txt` if
-                                // we can resolve the user's home dir,
-                                // else just the file basename in cwd.
+                                // Open the shared export modal, pre-filled with
+                                // a timestamped filename in the current dir.
                                 let default_path = Ui::default_export_path();
                                 ui.export_prompt.open(default_path);
                             }
@@ -374,6 +373,12 @@ impl Ui {
                 })?;
             }
         }
+
+        // Show a shutdown frame before tearing the terminal down so quitting
+        // reads as deliberate, not a freeze, while main drives the rest of the
+        // cleanup (graceful libp2p disconnect) and prints its progress.
+        let _ = terminal.draw(Self::render_shutting_down);
+        tokio::time::sleep(Duration::from_millis(400)).await;
 
         // Restore terminal. We return Ok here rather than process::exit so
         // main can drive the rest of the shutdown (graceful libp2p
@@ -564,6 +569,19 @@ impl Ui {
             Events::PinnedPeerStatuses { port, statuses } => {
                 self.state.pinned_statuses.insert(port, statuses);
             }
+            Events::StickyPool { port, peers } => {
+                // The remembered standby pool, so the NETWORK tab shows every
+                // exit in sticky_peers.json — not just the active one.
+                for pp in &peers {
+                    if let Some(addr) = pp.addresses.first() {
+                        self.state
+                            .note_peer_address(pp.peer_id, addr.clone(), AddrSource::Candidate);
+                    }
+                }
+                self.state
+                    .sticky_pools
+                    .insert(port, peers.into_iter().map(|pp| pp.peer_id).collect());
+            }
         };
 
         self.mark_dirty();
@@ -648,18 +666,29 @@ impl Ui {
         self.mark_clean();
     }
 
-    /// Pre-fill for the export prompt. Picks `~/p2proxy-logs-<ts>.txt`
-    /// when the user has a home directory (which is everyone running
-    /// the CLI in TUI mode by definition); falls back to the cwd
-    /// otherwise. Called fresh each time the user presses `e` so the
-    /// timestamp is current.
+    /// Pre-fill for the export prompt: `p2proxy-logs-<ts>.txt` in the current
+    /// working directory. Called fresh each time the user presses `e` so the
+    /// timestamp is current; the user can edit the path before confirming.
     pub(crate) fn default_export_path() -> String {
         let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S");
-        let filename = format!("p2proxy-logs-{stamp}.txt");
-        match std::env::var("HOME") {
-            Ok(home) if !home.is_empty() => format!("{home}/{filename}"),
-            _ => filename,
-        }
+        format!("p2proxy-logs-{stamp}.txt")
+    }
+
+    /// Full-screen "shutting down" frame, shown briefly on quit before the
+    /// terminal is restored and `main` prints the rest of the cleanup.
+    fn render_shutting_down(frame: &mut Frame<'_>) {
+        let area = frame.area();
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(SECONDARY))
+            .title(" P2PROXY ")
+            .title_alignment(Alignment::Center)
+            .style(Style::default().bg(BACKGROUND));
+        let body = Paragraph::new("\n\nShutting down…\n\ndisconnecting peers and closing listeners")
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(FOREGROUND))
+            .block(block);
+        frame.render_widget(body, area);
     }
 
     fn render_tabs(&mut self, frame: &mut Frame<'_>, area: Rect) {

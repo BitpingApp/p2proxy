@@ -87,53 +87,6 @@ impl StickyStore for StickyState {
         !was_front
     }
 
-    fn promote_connected(
-        &mut self,
-        port: u16,
-        fingerprint: &str,
-        peer: PeerId,
-        address: Multiaddr,
-        max: usize,
-    ) -> bool {
-        let max = max.max(1);
-        let pool = self.pools.entry(port).or_insert_with(|| StickyPool {
-            fingerprint: fingerprint.to_string(),
-            peers: Vec::new(),
-        });
-        if pool.fingerprint != fingerprint {
-            pool.fingerprint = fingerprint.to_string();
-            pool.peers.clear();
-        }
-
-        if let Some(entry) = pool.peers.iter_mut().find(|p| p.peer_id == peer) {
-            if entry.address.as_ref() == Some(&address) {
-                return false;
-            }
-            entry.address = Some(address);
-            return true;
-        }
-
-        if pool.peers.len() >= max {
-            let Some(idx) = pool
-                .peers
-                .iter()
-                .enumerate()
-                .skip(1)
-                .find(|(_, p)| p.address.is_none())
-                .map(|(i, _)| i)
-            else {
-                return false;
-            };
-            pool.peers.remove(idx);
-        }
-        pool.peers.push(StickyPeer {
-            peer_id: peer,
-            address: Some(address),
-            updated_at: Utc::now(),
-        });
-        true
-    }
-
     fn note_direct_address(&mut self, peer: PeerId, address: Multiaddr) {
         for pool in self.pools.values_mut() {
             if let Some(entry) = pool.peers.iter_mut().find(|p| p.peer_id == peer)
@@ -207,28 +160,6 @@ mod tests {
     }
 
     #[test]
-    fn promote_connected_evicts_relay_only_standby_never_front() {
-        let mut s = StickyState::default();
-        let active = random_peer();
-        let a = random_peer();
-        let b = random_peer();
-        s.remember(1080, "fp", active, 3);
-        s.remember(1080, "fp", a, 3);
-        s.remember(1080, "fp", active, 3);
-
-        assert!(s.promote_connected(1080, "fp", b, addr(b), 3));
-        assert_eq!(s.pool(1080, "fp"), vec![active, a, b]);
-        assert_eq!(s.direct_address(1080, b), Some(addr(b)));
-
-        let c = random_peer();
-        assert!(s.promote_connected(1080, "fp", c, addr(c), 3));
-        let pool = s.pool(1080, "fp");
-        assert_eq!(pool[0], active, "front (active) is never evicted");
-        assert!(pool.contains(&c) && pool.contains(&b));
-        assert!(!pool.contains(&a), "relay-only standby evicted");
-    }
-
-    #[test]
     fn forget_removes_one_keeps_rest() {
         let mut s = StickyState::default();
         let (a, b) = (random_peer(), random_peer());
@@ -239,11 +170,17 @@ mod tests {
     }
 
     #[test]
-    fn note_direct_address_records_where_pooled() {
+    fn note_direct_address_updates_existing_but_never_adds() {
         let mut s = StickyState::default();
         let p = random_peer();
+        let hub = random_peer();
         s.remember(1080, "fp", p, 5);
+
         s.note_direct_address(p, addr(p));
         assert_eq!(s.direct_address(1080, p), Some(addr(p)));
+
+        // A peer we merely connected to (e.g. a hub) is never added to the pool.
+        s.note_direct_address(hub, addr(hub));
+        assert!(!s.pool(1080, "fp").contains(&hub), "non-exit never added");
     }
 }

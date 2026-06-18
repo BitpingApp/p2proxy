@@ -58,6 +58,14 @@ pub enum Events {
         port: u16,
         statuses: Vec<PinnedPeerStatus>,
     },
+    /// The remembered sticky standby pool for a server (from
+    /// `sticky_peers.json`), so the NETWORK tab shows every remembered exit —
+    /// not just the active one. Emitted on each discovery pass; replaces the
+    /// previously-known sticky pool for `port`.
+    StickyPool {
+        port: u16,
+        peers: Vec<PoolPeer>,
+    },
 }
 
 /// One candidate in a server's FindNodes pool: the peer plus the dial

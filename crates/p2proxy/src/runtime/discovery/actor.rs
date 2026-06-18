@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -27,6 +27,7 @@ pub struct DiscoveryActor {
     sticky: FileStickyStore,
     destinations: HashMap<u16, DestinationHandle>,
     last_rediscovery: HashMap<u16, Instant>,
+    pending_rediscovery: HashSet<u16>,
 }
 
 impl DiscoveryActor {
@@ -35,13 +36,17 @@ impl DiscoveryActor {
             sticky,
             destinations,
             last_rediscovery: HashMap::new(),
+            pending_rediscovery: HashSet::new(),
         }
     }
 
     async fn discover(&mut self, ctx: &Context, port: u16, avoid: Option<PeerId>) -> Option<PeerId> {
+        self.pending_rediscovery.remove(&port);
         let server = ctx.config.servers.iter().find(|s| s.port == port).cloned()?;
         info!(port, "running peer discovery");
-        match self.connect(ctx, &server, avoid).await {
+        let result = self.connect(ctx, &server, avoid).await;
+        self.emit_sticky_pool(ctx, &server);
+        match result {
             Ok(destination) => {
                 let peer = destination.peer;
                 self.set_destination(ctx, port, destination);
@@ -54,6 +59,17 @@ impl DiscoveryActor {
         }
     }
 
+    /// Surface the remembered standby pool so the NETWORK tab shows every
+    /// sticky exit, not just the active one.
+    fn emit_sticky_pool(&self, ctx: &Context, server: &Server) {
+        let fingerprint = server.peer_options.filter_fingerprint(server.port);
+        let peers = self.sticky.snapshot(server.port, &fingerprint);
+        ctx.events.emit(Events::StickyPool {
+            port: server.port,
+            peers,
+        });
+    }
+
     async fn handle_peer_closed(&mut self, ctx: &Context, peer: PeerId) {
         let stale: Vec<u16> = self
             .destinations
@@ -63,12 +79,23 @@ impl DiscoveryActor {
             .collect();
 
         for port in stale {
-            let throttled = self
-                .last_rediscovery
-                .get(&port)
-                .is_some_and(|at| at.elapsed() < REDISCOVERY_COOLDOWN);
-            if throttled {
+            let elapsed = self.last_rediscovery.get(&port).map(|at| at.elapsed());
+            if let Some(elapsed) = elapsed
+                && elapsed < REDISCOVERY_COOLDOWN
+            {
+                // The peer is gone, so drop the active pointer — but don't
+                // abandon the port. Schedule a single rediscovery for when the
+                // cooldown lapses so a peer flapping inside the window doesn't
+                // leave the port permanently dark.
                 self.clear_destination(ctx, port);
+                if self.pending_rediscovery.insert(port) {
+                    let discovery = ctx.discovery.clone();
+                    let remaining = REDISCOVERY_COOLDOWN - elapsed;
+                    tokio::spawn(async move {
+                        tokio::time::sleep(remaining).await;
+                        discovery.discover_for(port).await;
+                    });
+                }
                 continue;
             }
             self.last_rediscovery.insert(port, Instant::now());
@@ -76,29 +103,33 @@ impl DiscoveryActor {
         }
     }
 
-    fn promote_direct(&mut self, ctx: &Context, peer: PeerId, address: Multiaddr) {
-        let target = {
-            let sticky_servers: Vec<&Server> = ctx
-                .config
-                .servers
-                .iter()
-                .filter(|s| s.peer_options.sticky && s.peer_options.pinned().is_empty())
-                .collect();
-            match sticky_servers.as_slice() {
-                [server] => Some((
-                    server.port,
-                    server.peer_options.filter_fingerprint(server.port),
-                    server.pool.max_total,
-                )),
-                _ => None,
-            }
-        };
-        match target {
-            Some((port, fingerprint, max)) => {
-                self.sticky
-                    .promote_connected(port, &fingerprint, peer, address, max);
-            }
-            None => self.sticky.note_direct_address(peer, address),
+    /// Record the real direct address a peer just connected on, so a later
+    /// reconnect can dial it straight. No-ops for a peer that isn't already a
+    /// remembered exit (e.g. a hub we connect to for bootstrap/relay/discovery).
+    fn promote_direct(&mut self, peer: PeerId, address: Multiaddr) {
+        self.sticky.note_direct_address(peer, address);
+    }
+
+    /// A peer that can't serve as an exit — it doesn't speak the proxy protocol
+    /// (e.g. a hub) or runs an incompatible forwarder. Drop it from every pool
+    /// so it's never re-adopted, then rediscover a real exit for any port it was
+    /// serving (with no sticky-reconnect back to it).
+    async fn handle_peer_unusable(&mut self, ctx: &Context, peer: PeerId) {
+        let servers: Vec<Server> = ctx.config.servers.clone();
+        for server in &servers {
+            self.sticky.forget_peer(server.port, peer);
+        }
+        let stale: Vec<u16> = self
+            .destinations
+            .iter()
+            .filter(|(_, handle)| **handle.load() == Some(peer))
+            .map(|(port, _)| *port)
+            .collect();
+        for port in stale {
+            self.discover(ctx, port, None).await;
+        }
+        for server in &servers {
+            self.emit_sticky_pool(ctx, server);
         }
     }
 
@@ -159,8 +190,9 @@ impl Actor for DiscoveryActor {
                 let _ = reply.send(peer);
             }
             DiscoveryEvent::PeerClosed(peer) => self.handle_peer_closed(ctx, peer).await,
+            DiscoveryEvent::PeerUnusable(peer) => self.handle_peer_unusable(ctx, peer).await,
             DiscoveryEvent::PeerConnectedDirect { peer, address } => {
-                self.promote_direct(ctx, peer, address)
+                self.promote_direct(peer, address)
             }
         }
         Ok(())
@@ -191,12 +223,12 @@ mod tests {
     fn test_config() -> Arc<Config> {
         Arc::new(Config {
             servers: vec![discovery_server(1080)],
-            port: 45445,
+            listen_addrs: vec!["0.0.0.0:0".parse().expect("addr")],
             bitping_api_key: "test-key".into(),
-            bootstrap: "/dnsaddr/boot2.bitping.com".parse().expect("addr"),
+            bootstrap_address: "/dnsaddr/boot2.bitping.com".parse().expect("addr"),
             grpc_url: "https://grpc.bitping.com".into(),
             keypair_path: "node_keypair.bin".into(),
-            metrics_addr: "127.0.0.1:9091".parse().expect("addr"),
+            metrics_port: 9091,
         })
     }
 
@@ -284,11 +316,22 @@ mod tests {
         assert_eq!(**destination.load(), Some(exit), "destination adopted");
 
         let mut saw_active = false;
+        let mut saw_sticky_pool = false;
         while let Ok(event) = ev_rx.try_recv() {
-            if matches!(event, Events::ActiveDestination { peer: Some(p), .. } if p == exit) {
-                saw_active = true;
+            match event {
+                Events::ActiveDestination { peer: Some(p), .. } if p == exit => saw_active = true,
+                Events::StickyPool { port: 1080, peers }
+                    if peers.iter().any(|pp| pp.peer_id == exit) =>
+                {
+                    saw_sticky_pool = true;
+                }
+                _ => {}
             }
         }
         assert!(saw_active, "ActiveDestination surfaced to the TUI");
+        assert!(
+            saw_sticky_pool,
+            "remembered sticky pool surfaced to the NETWORK tab"
+        );
     }
 }

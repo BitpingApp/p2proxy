@@ -1,12 +1,13 @@
 use std::collections::HashMap;
+use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use clap::Parser;
 use color_eyre::eyre::{Context, Result};
-use libp2p::PeerId;
 use libp2p::identity::Keypair;
+use libp2p::PeerId;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use proxy_core::config::Config;
 use proxy_core::events::Events;
@@ -16,7 +17,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::level_filters::LevelFilter;
 use tracing_error::ErrorLayer;
-use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
 
 mod adapters;
 mod args;
@@ -25,17 +26,17 @@ mod tui;
 mod utils;
 
 use adapters::channel_sink::ChannelSink;
-use adapters::file_sticky::{FileStickyStore, default_sticky_path};
+use adapters::file_sticky::{default_sticky_path, FileStickyStore};
 use adapters::grpc_auth::GrpcAuth;
-use adapters::keypair_identity::{KeypairIdentity, load_or_generate_keypair};
+use adapters::keypair_identity::{load_or_generate_keypair, KeypairIdentity};
 use adapters::tokio_clock::TokioClock;
 use args::Cli;
-use runtime::Context as AppContext;
-use runtime::Runtime;
 use runtime::discovery::{DestinationHandle, DiscoveryActor, DiscoveryEvent, DiscoveryHandle};
-use runtime::network::{NetworkActor, NetworkCommand, NetworkHandle, bootstrap};
+use runtime::network::{bootstrap, NetworkActor, NetworkCommand, NetworkHandle};
 use runtime::session::{SessionContext, SessionSupervisor};
 use runtime::stream_manager::PeerStreamManager;
+use runtime::Context as AppContext;
+use runtime::Runtime;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -49,10 +50,10 @@ async fn main() -> Result<()> {
     );
 
     PrometheusBuilder::new()
-        .with_http_listener(config.metrics_addr)
+        .with_http_listener(config.metrics_addr())
         .add_global_label("service", "p2proxy")
         .install()?;
-    tracing::info!(metrics = %config.metrics_addr, "metrics server running");
+    tracing::info!(metrics = %config.metrics_addr(), "metrics server running");
 
     let keypair = Arc::new(load_or_generate_keypair(std::path::Path::new(
         &config.keypair_path,
@@ -162,21 +163,49 @@ async fn main() -> Result<()> {
         ctx.discovery.discover_for(server.port).await;
     }
 
+    // Run until shutdown is requested (Ctrl+C / TUI quit) or a task ends early.
     let mut first_error: Option<color_eyre::Report> = None;
-    while let Some(joined) = tasks.join_next().await {
-        let outcome = match joined {
-            Ok(result) => result,
-            Err(join_err) => Err(color_eyre::eyre::eyre!("task panicked: {join_err}")),
-        };
-        if let Err(e) = outcome
-            && first_error.is_none()
-        {
-            first_error = Some(e);
+    tokio::select! {
+        _ = shutdown.cancelled() => {}
+        joined = tasks.join_next() => {
+            match joined {
+                Some(Ok(Err(e))) => first_error = Some(e),
+                Some(Err(join_err)) => {
+                    first_error = Some(color_eyre::eyre::eyre!("task panicked: {join_err}"));
+                }
+                _ => {}
+            }
             shutdown.cancel();
         }
     }
 
-    match first_error {
+    if cli.no_ui {
+        tracing::info!("shutting down…");
+    }
+
+    // Drain the rest with a hard cap so cleanup can never hang the process.
+    let drained = tokio::time::timeout(SHUTDOWN_GRACE, async {
+        let mut err = None;
+        while let Some(joined) = tasks.join_next().await {
+            match joined {
+                Ok(Err(e)) if err.is_none() => err = Some(e),
+                Err(join_err) if err.is_none() => {
+                    err = Some(color_eyre::eyre::eyre!("task panicked: {join_err}"));
+                }
+                _ => {}
+            }
+        }
+        err
+    })
+    .await;
+
+    let Ok(drain_error) = drained else {
+        shutdown_note(cli.no_ui, "cleanup timed out — forcing exit");
+        std::process::exit(i32::from(first_error.is_some()));
+    };
+
+    shutdown_note(cli.no_ui, "shutdown complete");
+    match first_error.or(drain_error) {
         Some(e) => Err(e),
         None => Ok(()),
     }
@@ -196,24 +225,37 @@ async fn start_network(
     );
     let token = auth.federated_token().await.context("federated auth")?;
 
-    let boot = bootstrap::bootstrap(
-        (**keypair).clone(),
-        config.port,
-        config.bootstrap.clone(),
-        events_tx,
-    )
-    .await?;
+    let boot = bootstrap::bootstrap((**keypair).clone(), config, events_tx).await?;
 
     Ok((boot, token))
 }
 
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
+
 fn spawn_ctrl_c_handler(shutdown: CancellationToken) {
     tokio::spawn(async move {
+        // First Ctrl+C: graceful. Second: force-quit, so a slow cleanup is
+        // always escapable instead of looking like a hang.
         if tokio::signal::ctrl_c().await.is_ok() {
-            tracing::info!("Ctrl+C received — initiating graceful shutdown");
+            tracing::info!("Ctrl+C received — shutting down (press Ctrl+C again to force quit)");
             shutdown.cancel();
         }
+        if tokio::signal::ctrl_c().await.is_ok() {
+            let _ = writeln!(std::io::stderr(), "p2proxy: forced shutdown");
+            std::process::exit(130);
+        }
     });
+}
+
+/// Surface shutdown progress in whichever mode we're in: tracing in headless
+/// (it reaches stdout), direct stderr in TUI mode (where tracing is captured by
+/// the log pane and the terminal has already been restored by this point).
+fn shutdown_note(no_ui: bool, msg: &str) {
+    if no_ui {
+        tracing::info!("{msg}");
+    } else {
+        let _ = writeln!(std::io::stderr(), "p2proxy: {msg}");
+    }
 }
 
 fn install_logging(no_ui: bool) -> Result<()> {

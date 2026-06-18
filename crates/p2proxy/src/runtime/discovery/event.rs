@@ -12,6 +12,10 @@ pub enum DiscoveryEvent {
         reply: oneshot::Sender<Option<PeerId>>,
     },
     PeerClosed(PeerId),
+    /// A peer that can't serve as an exit (doesn't speak the proxy protocol, or
+    /// runs an incompatible forwarder). Forget it from every pool and rediscover
+    /// — never reconnect to it.
+    PeerUnusable(PeerId),
     PeerConnectedDirect {
         peer: PeerId,
         address: Multiaddr,
@@ -47,6 +51,10 @@ impl DiscoveryHandle {
 
     pub async fn peer_closed(&self, peer: PeerId) {
         let _ = self.tx.send(DiscoveryEvent::PeerClosed(peer)).await;
+    }
+
+    pub async fn peer_unusable(&self, peer: PeerId) {
+        let _ = self.tx.send(DiscoveryEvent::PeerUnusable(peer)).await;
     }
 
     pub async fn peer_connected_direct(&self, peer: PeerId, address: Multiaddr) {
