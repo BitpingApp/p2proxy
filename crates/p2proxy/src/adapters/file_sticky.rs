@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use libp2p::{Multiaddr, PeerId};
 use proxy_core::domain::sticky::{StickyPeer, StickyPool, StickyState};
-use proxy_core::errors::StickyStoreError;
+use proxy_core::ports::StickyStoreError;
 use proxy_core::events::PoolPeer;
 use proxy_core::ports::StickyStore;
 use serde::{Deserialize, Serialize};

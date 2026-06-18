@@ -1,4 +1,4 @@
-use proxy_core::errors::AuthError;
+use proxy_core::ports::AuthError;
 use proxy_core::ports::{Authenticator, Identity};
 use protocols::auth::v1::{
     FederatedApiTokenAuthRequest, authentication_service_client::AuthenticationServiceClient,

@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use libp2p::{Multiaddr, PeerId};
 use proxy_core::config::Server;
-use proxy_core::errors::{DialError, DirectoryError};
+use proxy_core::ports::{DialError, DirectoryError};
 use proxy_core::events::PoolPeer;
 use proxy_core::ports::{Dialer, PeerDirectory};
 

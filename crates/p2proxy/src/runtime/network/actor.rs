@@ -10,7 +10,7 @@ use metrics::{counter, gauge, histogram};
 use p2p_protocol::P2pClient;
 use protocols::models::v1::{Bandwidth, Exclusions, Requirements};
 use proxy_core::domain::selection::destination_peer_ids;
-use proxy_core::errors::{DialError, DirectoryError};
+use proxy_core::ports::{DialError, DirectoryError};
 use proxy_core::events::{ConnectionEvents, Events, PoolPeer};
 use proxy_core::ports::{Actor, EventSink};
 use tokio::sync::mpsc::Receiver;

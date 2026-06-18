@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use libp2p::{Multiaddr, PeerId};
 use p2p_bandwidth_protocol::bandwidth_reporter::AuthedBandwidthReport;
-use proxy_core::errors::{DialError, DirectoryError};
+use proxy_core::ports::{DialError, DirectoryError};
 use proxy_core::events::PoolPeer;
 use tokio::sync::{mpsc, oneshot};
 

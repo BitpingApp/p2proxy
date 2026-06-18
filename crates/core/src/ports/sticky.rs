@@ -1,4 +1,5 @@
 use libp2p::{Multiaddr, PeerId};
+use thiserror::Error;
 
 use crate::events::PoolPeer;
 
@@ -30,4 +31,18 @@ pub trait StickyStore {
     /// its stored direct address — for display. Unlike `pool`, never invalidates
     /// on a fingerprint mismatch.
     fn snapshot(&self, port: u16, fingerprint: &str) -> Vec<PoolPeer>;
+}
+
+/// Persistence failures from a file-backed sticky store. Best-effort — the
+/// adapter logs these; the trait never surfaces them.
+#[derive(Debug, Error)]
+pub enum StickyStoreError {
+    #[error("failed to serialize sticky store: {0}")]
+    Serialize(#[from] serde_json::Error),
+    #[error("failed to persist sticky store to {path}: {source}")]
+    Persist {
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 }

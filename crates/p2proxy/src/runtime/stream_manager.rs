@@ -7,7 +7,7 @@ use libp2p_stream as stream;
 use libp2p_stream::OpenStreamError;
 use metrics::{counter, histogram};
 use p2p_bandwidth_protocol::TCP_PROXY_PROTOCOL;
-use proxy_core::errors::StreamError;
+use proxy_core::ports::StreamError;
 use proxy_core::ports::StreamOpener;
 use tokio::sync::Semaphore;
 use tokio::time::{Instant, timeout};

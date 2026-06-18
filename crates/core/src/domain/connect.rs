@@ -7,13 +7,37 @@ use crate::config::{DestinationPeerEntry, Server, StickyReconnect};
 use crate::domain::backoff::Backoff;
 use crate::domain::circuit::synthesize_circuit;
 use crate::domain::selection::candidate_routes;
-use crate::errors::{ConnectError, DirectoryError};
+use thiserror::Error;
+
 use crate::events::{DestinationSource, Events, PinnedPeerStatus};
-use crate::ports::{Clock, Dialer, EventSink, PeerDirectory, StickyStore};
+use crate::ports::{Clock, Dialer, DirectoryError, EventSink, PeerDirectory, StickyStore};
 
 const FINDNODES_DISCOVERY_LIMIT: usize = 25;
 const MAX_DISCOVERY_ATTEMPTS: usize = 20;
 const MAX_PINNED_PASSES: usize = 20;
+
+#[derive(Debug, Error)]
+pub enum ConnectError {
+    #[error("all {count} pinned peer(s) for :{port} are offline or unresolvable")]
+    PinnedExhausted { port: u16, count: usize },
+    #[error("no peer matched the filters for :{port} after {attempts} attempts")]
+    DiscoveryExhausted { port: u16, attempts: usize },
+    #[error("shutdown requested")]
+    Shutdown,
+    #[error(transparent)]
+    Directory(#[from] DirectoryError),
+}
+
+#[cfg(test)]
+mod connect_error_tests {
+    use super::*;
+
+    #[test]
+    fn directory_error_converts_into_connect_error() {
+        let e: ConnectError = DirectoryError::Timeout.into();
+        assert!(matches!(e, ConnectError::Directory(DirectoryError::Timeout)));
+    }
+}
 const STICKY_RECONNECT_ATTEMPTS: usize = 3;
 
 pub struct ConnectedDestination {

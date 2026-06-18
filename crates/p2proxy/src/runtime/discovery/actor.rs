@@ -7,7 +7,7 @@ use arc_swap::ArcSwap;
 use libp2p::{Multiaddr, PeerId};
 use proxy_core::config::Server;
 use proxy_core::domain::connect::{ConnectCtx, ConnectedDestination};
-use proxy_core::errors::ConnectError;
+use proxy_core::domain::connect::ConnectError;
 use proxy_core::events::Events;
 use proxy_core::ports::{Actor, EventSink, StickyStore};
 use tracing::info;

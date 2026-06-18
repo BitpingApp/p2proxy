@@ -5,7 +5,7 @@ use std::time::Duration;
 use libp2p::{Multiaddr, PeerId};
 
 use crate::domain::selection::{destination_peer_ids, last_p2p};
-use crate::errors::{DialError, DirectoryError};
+use crate::ports::{DialError, DirectoryError};
 use crate::events::{Events, PoolPeer};
 use crate::ports::{Clock, Dialer, EventSink, PeerDirectory};
 

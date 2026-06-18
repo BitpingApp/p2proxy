@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use libp2p::PeerId;
 use libp2p::identity::Keypair;
-use proxy_core::errors::AuthError;
+use proxy_core::ports::AuthError;
 use proxy_core::ports::Identity;
 use tracing::warn;
 
