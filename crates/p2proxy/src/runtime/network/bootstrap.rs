@@ -56,8 +56,7 @@ pub async fn bootstrap(
         .await;
 
     let multiaddrs = config
-        .listen_addrs
-        .clone()
+        .effective_listen_addrs()
         .into_iter()
         .flat_map(|addr| match addr {
             std::net::SocketAddr::V4(socket_addr_v4) => [

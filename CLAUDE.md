@@ -88,13 +88,14 @@ design (streaming / shared-resource shaped, not message-handler shaped).
 
 YAML; environment variables override file values. Top-level: `bitping_api_key`
 (or the `BITPING_API_KEY` env var), `servers`, `listen_addrs` (host:port list;
-default `0.0.0.0:0` + `[::]:0`, any port), `metrics_port` (default 9000),
-`bootstrap_address`, `grpc_url`, `keypair_path`. Per-server: `protocol`
+default `0.0.0.0:0` + `[::]:0`; the `port` shorthand fixes that default port),
+`metrics_port` (default 9091), `log_level`, `bootstrap_address`, `grpc_url`,
+`keypair_path`. Per-server: `protocol`
 (`Socks5`), `port`, `min_bandwidth` (default 50Mbps), `country`,
 `destination_peers` (ordered pinned list), `fallback_to_discovery`, `sticky`,
 `sticky_reconnect` (`with-backoff` | `fail-fast`), `pool { max_total,
-open_timeout_secs }`. Logging is controlled by `RUST_LOG` only — there is no
-`log_level` key. Full reference in [README.md](README.md).
+open_timeout_secs }`. Logging follows `RUST_LOG`, falling back to the `log_level`
+config key. Full reference in [README.md](README.md).
 
 `node_keypair.bin` (libp2p identity) and `sticky_peers.json` (remembered exit
 pool, fingerprinted by `country`/`min_bandwidth`/port) are written relative to
@@ -128,7 +129,7 @@ libp2p `Stream` that can't be faked without a full stream pair.
 
 ## Metrics
 
-Prometheus on `0.0.0.0:<metrics_port>` (default `:9000`). Useful series:
+Prometheus on `0.0.0.0:<metrics_port>` (default `:9091`). Useful series:
 `p2proxy_peers_connected`, `p2proxy_sessions_active`,
 `p2proxy_socks_connections_total`, `p2proxy_upload_bytes_total` /
 `p2proxy_download_bytes_total`, `p2proxy_session_errors_total{stage}`,

@@ -13,8 +13,19 @@ use thiserror::Error;
 #[derive(Deserialize, Debug)]
 pub struct Config {
     pub servers: Vec<Server>,
-    #[serde(default = "default_listen_addrs")]
-    pub listen_addrs: Vec<SocketAddr>,
+    /// libp2p listen addresses. When omitted, defaults to any port on all
+    /// interfaces (IPv4 + IPv6), with the port optionally fixed by the `port`
+    /// shorthand. When set explicitly, it takes precedence over `port`.
+    #[serde(default)]
+    pub listen_addrs: Option<Vec<SocketAddr>>,
+    /// Back-compat shorthand: fix the libp2p port on the *default* listen
+    /// addresses. Ignored when `listen_addrs` is set explicitly.
+    #[serde(default)]
+    pub port: Option<u16>,
+    /// Default log level when `RUST_LOG` is unset (`trace|debug|info|warn|error`
+    /// or a full directive). `RUST_LOG` still overrides it.
+    #[serde(default)]
+    pub log_level: Option<String>,
     pub bitping_api_key: Cow<'static, str>,
     /// libp2p multiaddr of the bootstrap hub. Defaults to Bitping's
     /// production hub (`/dnsaddr/boot2.bitping.com`), which is what every
@@ -52,7 +63,7 @@ fn default_keypair_path() -> String {
 }
 
 fn default_metrics_port() -> u16 {
-    9000
+    9091
 }
 
 fn default_listen_addrs() -> Vec<SocketAddr> {
@@ -76,12 +87,33 @@ impl Config {
             .to_string()
     }
 
+    /// The libp2p listen addresses. Explicit `listen_addrs` wins; otherwise the
+    /// default addresses, with their port fixed by the `port` shorthand if set.
+    pub fn effective_listen_addrs(&self) -> Vec<SocketAddr> {
+        if let Some(addrs) = &self.listen_addrs {
+            return addrs.clone();
+        }
+        let Some(port) = self.port else {
+            return default_listen_addrs();
+        };
+        default_listen_addrs()
+            .into_iter()
+            .map(|mut addr| {
+                addr.set_port(port);
+                addr
+            })
+            .collect()
+    }
+
     pub fn metrics_addr(&self) -> SocketAddr {
-        self.listen_addrs.first().map_or_else(|| SocketAddr::from(([0, 0, 0, 0], 9000)), |x|  {
-            let mut addr = x.clone();
-            addr.set_port(self.metrics_port);
-            addr
-        })
+        self.effective_listen_addrs().first().map_or_else(
+            || SocketAddr::from(([0, 0, 0, 0], self.metrics_port)),
+            |x| {
+                let mut addr = *x;
+                addr.set_port(self.metrics_port);
+                addr
+            },
+        )
     }
 }
 
@@ -590,7 +622,9 @@ mod defaults_tests {
     fn config_with_grpc(url: &str) -> Config {
         Config {
             servers: vec![],
-            listen_addrs: default_listen_addrs(),
+            listen_addrs: None,
+            port: None,
+            log_level: None,
             bitping_api_key: "".into(),
             bootstrap_address: default_bootstrap(),
             grpc_url: url.into(),
@@ -610,7 +644,7 @@ mod defaults_tests {
                 .contains("boot2.bitping.com")
         );
         assert!(!default_listen_addrs().is_empty());
-        assert_eq!(default_metrics_port(), 9000);
+        assert_eq!(default_metrics_port(), 9091);
         assert_eq!(default_keypair_path(), "node_keypair.bin");
         assert_eq!(default_grpc_url(), "https://grpc.bitping.com");
     }

@@ -234,7 +234,9 @@ mod tests {
     fn test_config() -> Arc<Config> {
         Arc::new(Config {
             servers: vec![discovery_server(1080)],
-            listen_addrs: vec!["0.0.0.0:0".parse().expect("addr")],
+            listen_addrs: Some(vec!["0.0.0.0:0".parse().expect("addr")]),
+            port: None,
+            log_level: None,
             bitping_api_key: "test-key".into(),
             bootstrap_address: "/dnsaddr/boot2.bitping.com".parse().expect("addr"),
             grpc_url: "https://grpc.bitping.com".into(),

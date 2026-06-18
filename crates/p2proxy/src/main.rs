@@ -41,13 +41,14 @@ use runtime::Runtime;
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    install_logging(cli.no_ui)?;
-    color_eyre::install()?;
 
     let config = Arc::new(
         Config::from_path(&cli.config)
             .with_context(|| format!("loading config from {}", cli.config))?,
     );
+
+    install_logging(config.log_level.as_deref(), cli.no_ui)?;
+    color_eyre::install()?;
 
     PrometheusBuilder::new()
         .with_http_listener(config.metrics_addr())
@@ -258,10 +259,13 @@ fn shutdown_note(no_ui: bool, msg: &str) {
     }
 }
 
-fn install_logging(no_ui: bool) -> Result<()> {
+fn install_logging(log_level: Option<&str>, no_ui: bool) -> Result<()> {
+    let default_directive: tracing_subscriber::filter::Directive = log_level
+        .and_then(|level| level.parse().ok())
+        .unwrap_or_else(|| LevelFilter::INFO.into());
     let log_filter = || {
         EnvFilter::builder()
-            .with_default_directive(LevelFilter::INFO.into())
+            .with_default_directive(default_directive.clone())
             .from_env_lossy()
     };
 

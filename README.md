@@ -83,13 +83,15 @@ Requires a recent stable Rust toolchain (`rustup install stable`).
 |---|---|---|---|
 | `bitping_api_key` | string | — (**required**) | Your Bitping API key. May instead be supplied via the `BITPING_API_KEY` env var (which overrides this). |
 | `servers` | list | — (**required**) | One or more proxy endpoints (below). |
-| `listen_addrs` | list of `host:port` | `0.0.0.0:0` and `[::]:0` (any port) | Addresses the libp2p stack listens on (TCP + QUIC are bound per entry). Forwarding a fixed port improves direct (non-relayed) connectivity but isn't required. |
-| `metrics_port` | u16 | `9000` | Port for the Prometheus endpoint (bound on `0.0.0.0`). |
+| `listen_addrs` | list of `host:port` | `0.0.0.0:0` and `[::]:0` (any port) | Addresses the libp2p stack listens on (TCP + QUIC are bound per entry). Takes precedence over `port`. |
+| `port` | u16 | — | Shorthand that fixes the libp2p port on the default listen addresses (e.g. `45445`). Ignored when `listen_addrs` is set. |
+| `log_level` | string | `info` | Default log level when `RUST_LOG` is unset (`trace`/`debug`/`info`/`warn`/`error`, or a full directive). `RUST_LOG` overrides it. |
+| `metrics_port` | u16 | `9091` | Port for the Prometheus endpoint (bound on `0.0.0.0`). |
 | `bootstrap_address` | multiaddr | `/dnsaddr/boot2.bitping.com` | Bootstrap hub. Override for staging / a self-hosted hub. |
 | `grpc_url` | url | `https://grpc.bitping.com` | Bitping auth service endpoint. |
 | `keypair_path` | path | `node_keypair.bin` | Where the node's libp2p identity is persisted (CWD-relative). |
 
-> Logging is controlled by `RUST_LOG` (e.g. `RUST_LOG=info` or `RUST_LOG=p2proxy=debug`), **not** a config key.
+> Logging follows `RUST_LOG` when set (e.g. `RUST_LOG=p2proxy=debug`); otherwise the `log_level` config key above (default `info`).
 
 ### Per-server
 
@@ -180,7 +182,7 @@ WantedBy=multi-user.target
 
 ## Metrics
 
-Prometheus metrics are exposed on `0.0.0.0:<metrics_port>` (default `:9000`). Selected series:
+Prometheus metrics are exposed on `0.0.0.0:<metrics_port>` (default `:9091`). Selected series:
 
 - `p2proxy_peers_connected` — gauge of connected libp2p peers.
 - `p2proxy_sessions_active` — gauge of in-flight SOCKS sessions.
@@ -195,7 +197,7 @@ Prometheus metrics are exposed on `0.0.0.0:<metrics_port>` (default `:9000`). Se
 scrape_configs:
   - job_name: p2proxy
     static_configs:
-      - targets: ["localhost:9000"]
+      - targets: ["localhost:9091"]
 ```
 
 ## Verifying downloads
