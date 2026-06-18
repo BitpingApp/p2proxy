@@ -1,0 +1,6 @@
+# The customer/p2proxy crates are edition 2024 (let-chains, etc.). Pin rustfmt
+# to that edition so `cargo fmt` and a bare `rustfmt` run in this workspace
+# format consistently — the rest of the monorepo is still edition 2021, so this
+# is scoped here rather than at the repo root.
+edition = "2024"
+style_edition = "2024"

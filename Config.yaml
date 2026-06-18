@@ -5,17 +5,14 @@
 
 # UDP port the libp2p stack listens on. Does NOT need to be port-forwarded
 # for the proxy to work, but forwarding it improves peer connectivity and
-# reduces relay reliance.
-port: 45445
+# reduces relay reliance. Defaults to 0 (any port)
+# port: 45445
 
 # Logging verbosity: trace | debug | info | warn | error
 log_level: info
 
 # Optional top-level overrides (all have sensible defaults):
-# grpc_url: https://grpc.bitping.com   # Bitping auth service gRPC endpoint
 # keypair_path: node_keypair.bin       # where the node identity is persisted
-# metrics_addr: 127.0.0.1:9091         # Prometheus bind addr; use 0.0.0.0:9091
-#                                      # to scrape metrics from another host
 
 # One or more proxy endpoints. Each entry opens a local listener and
 # routes traffic through peers matching the filter.
@@ -24,10 +21,18 @@ servers:
     port: 1080
     # Minimum advertised bandwidth a peer must have to be selected.
     # Lower values = more peer options but potentially slower throughput.
-    min_bandwidth: 1kbps
+    min_bandwidth: 50Mbps
 
     # Optional: pin to a country (ISO-3166 alpha-2). Omit for any country.
-    # country: NL
+    country: NL
+  - protocol: Socks5
+    port: 1081
+    # Minimum advertised bandwidth a peer must have to be selected.
+    # Lower values = more peer options but potentially slower throughput.
+    min_bandwidth: 20Mbps
+
+    # Optional: pin to a country (ISO-3166 alpha-2). Omit for any country.
+    country: AU
 
     # Optional: ordered pinned-peer preference list for stable egress IPs.
     # Entries are bare peer ids (preferred — the current route is resolved
