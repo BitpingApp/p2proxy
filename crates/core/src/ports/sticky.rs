@@ -1,5 +1,7 @@
 use libp2p::{Multiaddr, PeerId};
 
+use crate::events::PoolPeer;
+
 /// Remembered exit-peer affinity for discovery-driven servers. Production
 /// persists to `sticky_peers.json`; the fake keeps it in memory. All mutations
 /// are best-effort — persistence failures are logged by the adapter, never
@@ -23,4 +25,9 @@ pub trait StickyStore {
 
     /// Drop one peer from `port`'s pool after it failed to reconnect.
     fn forget_peer(&mut self, port: u16, peer: PeerId);
+
+    /// Read-only snapshot of `port`'s remembered pool — every standby peer with
+    /// its stored direct address — for display. Unlike `pool`, never invalidates
+    /// on a fingerprint mismatch.
+    fn snapshot(&self, port: u16, fingerprint: &str) -> Vec<PoolPeer>;
 }

@@ -13,7 +13,6 @@ use proxy_core::ports::{Actor, EventSink, StickyStore};
 use tracing::info;
 
 use super::event::DiscoveryEvent;
-use crate::adapters::file_sticky::FileStickyStore;
 use crate::runtime::context::Context;
 
 pub type DestinationHandle = Arc<ArcSwap<Option<PeerId>>>;
@@ -23,15 +22,15 @@ const REDISCOVERY_COOLDOWN: Duration = Duration::from_secs(30);
 /// Runs the pure `core::connect` flow against the ports in `Context`, owns the
 /// sticky store and the per-port destination handles, and reacts to peer
 /// connects (sticky promotion) and closes (throttled rediscovery).
-pub struct DiscoveryActor {
-    sticky: FileStickyStore,
+pub struct DiscoveryActor<S: StickyStore> {
+    sticky: S,
     destinations: HashMap<u16, DestinationHandle>,
     last_rediscovery: HashMap<u16, Instant>,
     pending_rediscovery: HashSet<u16>,
 }
 
-impl DiscoveryActor {
-    pub fn new(sticky: FileStickyStore, destinations: HashMap<u16, DestinationHandle>) -> Self {
+impl<S: StickyStore> DiscoveryActor<S> {
+    pub fn new(sticky: S, destinations: HashMap<u16, DestinationHandle>) -> Self {
         Self {
             sticky,
             destinations,
@@ -174,7 +173,7 @@ impl DiscoveryActor {
     }
 }
 
-impl Actor for DiscoveryActor {
+impl<S: StickyStore + Send + Sync> Actor for DiscoveryActor<S> {
     type Input = DiscoveryEvent;
     type Output = ();
     type Error = Infallible;

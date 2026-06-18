@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use libp2p::{Multiaddr, PeerId};
 use serde::{Deserialize, Serialize};
 
+use crate::events::PoolPeer;
 use crate::ports::StickyStore;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,6 +106,22 @@ impl StickyStore for StickyState {
         if pool.peers.is_empty() {
             self.pools.remove(&port);
         }
+    }
+
+    fn snapshot(&self, port: u16, fingerprint: &str) -> Vec<PoolPeer> {
+        self.pools
+            .get(&port)
+            .filter(|pool| pool.fingerprint == fingerprint)
+            .map(|pool| {
+                pool.peers
+                    .iter()
+                    .map(|p| PoolPeer {
+                        peer_id: p.peer_id,
+                        addresses: p.address.clone().into_iter().collect(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 }
 

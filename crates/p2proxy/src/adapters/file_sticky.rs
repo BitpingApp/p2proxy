@@ -80,26 +80,6 @@ impl FileStickyStore {
             warn!(?e, "failed to persist sticky store");
         }
     }
-
-    /// Snapshot the remembered pool for the NETWORK tab: every standby peer
-    /// with its stored direct address (if any). Read-only — unlike `pool()` it
-    /// never invalidates the pool on a fingerprint mismatch.
-    pub fn snapshot(&self, port: u16, fingerprint: &str) -> Vec<PoolPeer> {
-        self.state
-            .pools()
-            .get(&port)
-            .filter(|pool| pool.fingerprint == fingerprint)
-            .map(|pool| {
-                pool.peers
-                    .iter()
-                    .map(|p| PoolPeer {
-                        peer_id: p.peer_id,
-                        addresses: p.address.clone().into_iter().collect(),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
 }
 
 impl StickyStore for FileStickyStore {
@@ -127,6 +107,10 @@ impl StickyStore for FileStickyStore {
     fn forget_peer(&mut self, port: u16, peer: PeerId) {
         self.state.forget_peer(port, peer);
         self.save_best_effort();
+    }
+
+    fn snapshot(&self, port: u16, fingerprint: &str) -> Vec<PoolPeer> {
+        self.state.snapshot(port, fingerprint)
     }
 }
 
