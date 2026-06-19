@@ -8,7 +8,9 @@ use futures::StreamExt;
 use libp2p::{PeerId, identify, ping, relay, swarm::SwarmEvent};
 use metrics::{counter, gauge, histogram};
 use p2p_protocol::P2pClient;
-use protocols::models::v1::{Bandwidth, Exclusions, Requirements};
+use protocols::models::v1::{Bandwidth, Exclusions};
+
+use super::requirements::requirements_from_filters;
 use proxy_core::domain::selection::destination_peer_ids;
 use proxy_core::ports::{DialError, DirectoryError};
 use proxy_core::events::{ConnectionEvents, Events, PoolPeer};
@@ -107,18 +109,14 @@ impl NetworkActor {
                 });
             }
             NetworkCommand::FindNodes {
-                country,
-                min_bandwidth_bps,
+                filters,
                 limit,
                 reply,
             } => {
-                let mut requirements = Requirements::default();
-                if let Some(country) = country {
-                    requirements.countries = vec![country];
-                }
+                let requirements = requirements_from_filters(&filters);
                 let exclusions = Exclusions {
                     bandwidth: Some(Bandwidth {
-                        less_than: Some(min_bandwidth_bps as f64),
+                        less_than: Some(filters.min_bandwidth_bps as f64),
                         greater_than: None,
                     }),
                     ..Default::default()

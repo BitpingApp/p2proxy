@@ -10,6 +10,8 @@ use libp2p::{Multiaddr, PeerId, multiaddr::Protocol};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::filters::FilterPolicy;
+
 #[derive(Deserialize, Debug)]
 pub struct Config {
     pub servers: Vec<Server>,
@@ -200,6 +202,25 @@ pub struct ServerPeerOptions {
     #[serde(default = "default_min_bandwith")]
     #[serde(with = "human_bandwidth::serde")]
     pub min_bandwidth: Bandwidth,
+    /// City filter. Matched against the node's city (the hub accepts a bare
+    /// city name or the `City; Region; Country` form).
+    #[serde(default)]
+    pub city: Option<String>,
+    /// ISP filter — a regex the hub matches against the node's ISP.
+    #[serde(default)]
+    pub isp: Option<String>,
+    /// Autonomous System Number filter (e.g. `1136`).
+    #[serde(default)]
+    pub asn: Option<u32>,
+    /// Proxy-node policy: `allow` (default), `deny`, or `require`.
+    #[serde(default)]
+    pub proxy: FilterPolicy,
+    /// Mobile-network policy: `allow` (default), `deny`, or `require`.
+    #[serde(default)]
+    pub mobile: FilterPolicy,
+    /// Hosting (datacenter) policy: `allow` (default), `deny`, or `require`.
+    #[serde(default)]
+    pub hosting: FilterPolicy,
 }
 
 fn default_sticky() -> bool {
@@ -336,9 +357,15 @@ impl ServerPeerOptions {
     /// instead of silently exiting through a peer that no longer matches.
     pub fn filter_fingerprint(&self, port: u16) -> String {
         format!(
-            "v1|{port}|{}|{}",
+            "v2|{port}|{}|{}|{}|{}|{}|{:?}|{:?}|{:?}",
             self.country.as_deref().unwrap_or(""),
-            self.min_bandwidth.as_bps()
+            self.city.as_deref().unwrap_or(""),
+            self.isp.as_deref().unwrap_or(""),
+            self.asn.map(|a| a.to_string()).unwrap_or_default(),
+            self.min_bandwidth.as_bps(),
+            self.proxy,
+            self.mobile,
+            self.hosting,
         )
     }
 }
@@ -419,6 +446,12 @@ mod destination_peer_tests {
             sticky_reconnect: StickyReconnect::default(),
             country: None,
             min_bandwidth: default_min_bandwith(),
+            city: None,
+            isp: None,
+            asn: None,
+            proxy: FilterPolicy::default(),
+            mobile: FilterPolicy::default(),
+            hosting: FilterPolicy::default(),
         }
     }
 

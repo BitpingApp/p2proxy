@@ -33,11 +33,7 @@ impl PeerDirectory for SwarmGateway {
         limit: usize,
     ) -> Result<Vec<PoolPeer>, DirectoryError> {
         self.net
-            .find_nodes(
-                server.peer_options.country.clone(),
-                server.peer_options.min_bandwidth.as_bps(),
-                limit,
-            )
+            .find_nodes(server.peer_options.node_filters(), limit)
             .await
     }
 }

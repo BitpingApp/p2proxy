@@ -30,6 +30,12 @@ fn options() -> ServerPeerOptions {
         sticky_reconnect: StickyReconnect::WithBackoff,
         country: None,
         min_bandwidth: Bandwidth::from_mbps(0),
+        city: None,
+        isp: None,
+        asn: None,
+        proxy: Default::default(),
+        mobile: Default::default(),
+        hosting: Default::default(),
     }
 }
 

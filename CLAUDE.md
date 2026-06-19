@@ -91,14 +91,16 @@ YAML; environment variables override file values. Top-level: `bitping_api_key`
 default `0.0.0.0:0` + `[::]:0`; the `port` shorthand fixes that default port),
 `metrics_port` (default 9091), `log_level`, `bootstrap_address`, `grpc_url`,
 `keypair_path`. Per-server: `protocol`
-(`Socks5`), `port`, `min_bandwidth` (default 50Mbps), `country`,
+(`Socks5`), `port`, `min_bandwidth` (default 50Mbps), `country`, `city`, `isp`
+(regex), `asn`, `proxy`/`mobile`/`hosting` (`allow`|`deny`|`require`; `hosting`
+maps to the hub's inverted `residential` policy),
 `destination_peers` (ordered pinned list), `fallback_to_discovery`, `sticky`,
 `sticky_reconnect` (`with-backoff` | `fail-fast`), `pool { max_total,
 open_timeout_secs }`. Logging follows `RUST_LOG`, falling back to the `log_level`
 config key. Full reference in [README.md](README.md).
 
 `node_keypair.bin` (libp2p identity) and `sticky_peers.json` (remembered exit
-pool, fingerprinted by `country`/`min_bandwidth`/port) are written relative to
+pool, fingerprinted by the server's selection filters + port) are written relative to
 the CWD; run separate instances from separate working directories.
 
 ## Common Commands

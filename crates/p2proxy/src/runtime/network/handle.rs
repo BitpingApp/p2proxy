@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use libp2p::{Multiaddr, PeerId};
 use p2p_bandwidth_protocol::bandwidth_reporter::AuthedBandwidthReport;
+use proxy_core::filters::NodeFilters;
 use proxy_core::ports::{DialError, DirectoryError};
 use proxy_core::events::PoolPeer;
 use tokio::sync::{mpsc, oneshot};
@@ -35,15 +36,13 @@ impl NetworkHandle {
 
     pub async fn find_nodes(
         &self,
-        country: Option<String>,
-        min_bandwidth_bps: u128,
+        filters: NodeFilters,
         limit: usize,
     ) -> Result<Vec<PoolPeer>, DirectoryError> {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(NetworkCommand::FindNodes {
-                country,
-                min_bandwidth_bps,
+                filters,
                 limit,
                 reply,
             })

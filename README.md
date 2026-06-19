@@ -3,7 +3,7 @@
 A peer-to-peer SOCKS5 proxy daemon built on [libp2p](https://libp2p.io/). It routes outbound traffic through the [Bitping](https://bitping.com/) network of distributed peer nodes instead of through a single centralised proxy provider.
 
 - **SOCKS5** on a local port — point any application (browser, `curl`, Playwright, a whole WireGuard tunnel) at it.
-- **Filtered peer selection** — pick exits by minimum bandwidth, country, or a specific peer ID.
+- **Filtered peer selection** — pick exits by minimum bandwidth, country, city, ISP, ASN, network type (proxy / mobile / hosting), or a specific peer ID.
 - **Stable egress IPs** — pin an ordered list of peer IDs, or let *sticky* mode remember the discovered exit across restarts and reconnects.
 - **Live TUI** for status (peers, sessions, bandwidth, the rotation pool); `--no-ui` for headless / systemd / Docker.
 - **Prometheus metrics** for observability.
@@ -101,6 +101,12 @@ Requires a recent stable Rust toolchain (`rustup install stable`).
 | `port` | u16 | — | Local TCP port the SOCKS5 listener binds. |
 | `min_bandwidth` | string | `50Mbps` | Minimum advertised peer bandwidth. Format `<N>{bps,Kbps,Mbps,Gbps}`. |
 | `country` | string | — | Country filter. Accepts Alpha-2 (`AU`), Alpha-3 (`AUS`), or name (`Australia`) — normalised to Alpha-2. Omit for any country. |
+| `city` | string | — | City filter — a bare city name (`Tiel`) or `City; Region; Country`. Omit for any city. |
+| `isp` | string | — | ISP filter — a regex matched against the node's ISP (e.g. `Comcast`). |
+| `asn` | u32 | — | Autonomous System Number filter (e.g. `1136`). |
+| `proxy` | enum | `allow` | Proxy-node policy: `allow` (any), `deny` (no proxies), or `require` (only proxies). |
+| `mobile` | enum | `allow` | Mobile-network policy: `allow`, `deny`, or `require`. |
+| `hosting` | enum | `allow` | Hosting/datacenter policy: `allow`, `deny` (residential only), or `require` (datacenter only). |
 | `destination_peers` | list | — | Ordered pinned-peer preference list (see below). |
 | `fallback_to_discovery` | bool | `false` | When all pinned peers are offline: `false` keeps retrying the list; `true` falls back to country/bandwidth discovery. |
 | `sticky` | bool | `true` | Remember the discovered exit in `sticky_peers.json` and reuse it across restarts. Ignored when `destination_peers` is set. |
@@ -125,7 +131,7 @@ servers:
 - Bare peer ids are resolved to the peer's *current* route through the hub on every (re)connect, so a pin survives the peer moving between hubs. A full multiaddr ending in `/p2p/<id>` is also dialed verbatim.
 - **Hard pin by default:** when every listed peer is offline, p2proxy keeps retrying and surfaces an error rather than silently routing through an arbitrary node. Set `fallback_to_discovery: true` to prefer availability over identity.
 
-**Sticky peers** (`sticky: true`, default for unpinned servers) gives stable IPs without naming peers up front: the first discovery matching your `country`/`min_bandwidth` is remembered in `sticky_peers.json` (next to `node_keypair.bin`) and reused across restarts and reconnects, with a small standby pool for fast failover. Changing a server's `country`/`min_bandwidth`/`port` invalidates the remembered set automatically.
+**Sticky peers** (`sticky: true`, default for unpinned servers) gives stable IPs without naming peers up front: the first discovery matching your selection filters (`country`/`city`/`isp`/`asn`/`min_bandwidth`/`proxy`/`mobile`/`hosting`) is remembered in `sticky_peers.json` (next to `node_keypair.bin`) and reused across restarts and reconnects, with a small standby pool for fast failover. Changing any of a server's filters or its `port` invalidates the remembered set automatically.
 
 > The old single `destination_peer` key was removed — use `destination_peers` (a list). Restarts no longer rotate the exit IP by default; set `sticky: false` for a fresh peer each run.
 

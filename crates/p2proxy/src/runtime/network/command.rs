@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use libp2p::{Multiaddr, PeerId};
 use p2p_bandwidth_protocol::bandwidth_reporter::AuthedBandwidthReport;
+use proxy_core::filters::NodeFilters;
 use proxy_core::ports::{DialError, DirectoryError};
 use proxy_core::events::PoolPeer;
 use tokio::sync::oneshot;
@@ -14,8 +15,7 @@ pub enum NetworkCommand {
         reply: oneshot::Sender<Result<HashMap<PeerId, Vec<Multiaddr>>, DirectoryError>>,
     },
     FindNodes {
-        country: Option<String>,
-        min_bandwidth_bps: u128,
+        filters: NodeFilters,
         limit: usize,
         reply: oneshot::Sender<Result<Vec<PoolPeer>, DirectoryError>>,
     },
