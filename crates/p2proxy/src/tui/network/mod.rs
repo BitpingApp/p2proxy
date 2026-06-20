@@ -98,7 +98,7 @@ impl Ui {
     /// Compact one-line summary used when a server isn't expanded.
     /// Encodes everything the operator typically wants at a glance:
     /// caret indicating selection, expansion state (▾ open / ▸ closed),
-    /// port, country filter, active-peer presence, pool size.
+    /// port, node-filter summary, active-peer presence, pool size.
     fn render_server_block_collapsed(
         &self,
         frame: &mut Frame<'_>,
@@ -114,11 +114,12 @@ impl Ui {
             .map(|v| v.len())
             .unwrap_or(0);
 
-        let country = server
-            .peer_options
-            .country
-            .clone()
-            .unwrap_or_else(|| "any".to_string());
+        let filter_labels = server.peer_options.filter_labels();
+        let filter_summary = if filter_labels.is_empty() {
+            "filters: any".to_string()
+        } else {
+            filter_labels.join("  ·  ")
+        };
 
         let active_label = match active {
             Some(_) => Span::styled(
@@ -142,10 +143,7 @@ impl Ui {
             ),
             port_span,
             Span::raw("  "),
-            Span::styled(
-                format!("country: {country}"),
-                Style::default().fg(FOREGROUND),
-            ),
+            Span::styled(filter_summary, Style::default().fg(FOREGROUND)),
             Span::raw("  ·  "),
             active_label,
             Span::raw("  ·  "),
@@ -172,13 +170,9 @@ impl Ui {
         server: &proxy_core::config::Server,
         is_selected: bool,
     ) {
-        // Filter summary line: country / min_bandwidth. `min_bandwidth`
-        // is a human_bandwidth value with a tidy Display impl, so we
-        // just format with `:#}` for the SI-suffixed form (10 Mbps).
-        let mut filter_parts: Vec<String> = Vec::new();
-        if let Some(ref country) = server.peer_options.country {
-            filter_parts.push(format!("country: {country}"));
-        }
+        // Filter summary line: every active node-selection filter, then the
+        // bandwidth floor, then pinned / sticky routing.
+        let mut filter_parts: Vec<String> = server.peer_options.filter_labels();
         // `Bandwidth` is a `human_bandwidth::Bandwidth` — no Display
         // impl, so format the bits-per-second manually. Use bps for
         // the smallest tier (matches Config.yaml's "100mbps" syntax).
