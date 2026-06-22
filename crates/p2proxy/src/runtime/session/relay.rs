@@ -6,15 +6,16 @@ use libp2p::PeerId;
 use libp2p::identity::Keypair;
 use metrics::{counter, gauge};
 use p2p_bandwidth_protocol::bandwidth_reporter::{AuthedBandwidthReport, BandwidthReport};
-use p2p_bandwidth_protocol::{DataPhaseMessage, ProxySession, TargetAddr};
+use p2p_bandwidth_protocol::{
+    copy_from_session, copy_into_session, ProxySession, Role, TargetAddr,
+};
 use proxy_core::events::{BandwidthEvents, Events, SessionEvents};
 use proxy_core::ports::{EventSink, StreamOpener};
 use socks5_impl::protocol::{
     Address, AsyncStreamOperation, AuthMethod, Reply, Request, Response, handshake,
 };
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, BufWriter};
 use tokio::net::TcpStream;
-use tokio::select;
+use tokio::sync::Notify;
 use tokio::time::timeout;
 use tracing::{debug, warn};
 use uuid::Uuid;
@@ -119,7 +120,7 @@ async fn handle_socks_connection(ctx: SessionContext, mut socket: TcpStream, pee
     counter!("p2proxy_sessions_initialized_total").increment(1);
     gauge!("p2proxy_sessions_active").increment(1.0);
 
-    let (outgoing, incoming) = relay(&ctx, &mut socket, &mut session, session_id).await;
+    let (outgoing, incoming) = relay(&ctx, &mut socket, session, session_id).await;
     debug!(
         %session_id, %peer,
         up_bytes = outgoing.bytes,
@@ -127,7 +128,6 @@ async fn handle_socks_connection(ctx: SessionContext, mut socket: TcpStream, pee
         "proxy session closing"
     );
 
-    let _ = session.close().await;
     gauge!("p2proxy_sessions_active").decrement(1.0);
     ctx.streams.stream_closed(peer);
     ctx.events
@@ -141,70 +141,51 @@ struct Transferred {
     hash: blake3::Hash,
 }
 
+/// Relay bytes both ways between the SOCKS client socket and the peer via the
+/// shared full-duplex primitives. The peer's `Close` is authoritative (download
+/// ends the session and stops the upload); the client's upload half-closes. An
+/// error on one direction can't tear down the other.
 async fn relay(
     ctx: &SessionContext,
     socket: &mut TcpStream,
-    session: &mut ProxySession<'_>,
+    session: ProxySession<'_>,
     session_id: Uuid,
 ) -> (Transferred, Transferred) {
-    let (mut socket_read, socket_write) = socket.split();
-    let mut socket_write = BufWriter::with_capacity(SOCKET_BUF_SIZE, socket_write);
-    let mut buf = vec![0u8; SOCKET_BUF_SIZE];
-    let mut incoming_hasher = blake3::Hasher::new();
-    let mut outgoing_hasher = blake3::Hasher::new();
-    let mut incoming_bytes = 0usize;
-    let mut outgoing_bytes = 0usize;
-
-    loop {
-        select! {
-            read = socket_read.read(&mut buf) => match read {
-                Ok(0) => {
-                    let _ = session.send_close().await;
-                    break;
-                }
-                Ok(n) => {
-                    outgoing_hasher.update(&buf[..n]);
-                    if session.send_data(buf[..n].to_vec()).await.is_err() {
-                        session_error("data-transfer", "failed to write to peer");
-                        break;
-                    }
-                    outgoing_bytes += n;
-                    counter!("p2proxy_upload_bytes_total").increment(n as u64);
-                    ctx.events.emit(Events::Bandwidth(BandwidthEvents::Upload(session_id, n as u64)));
-                }
-                Err(e) => { session_error("data-transfer", e); break; }
-            },
-            message = session.read_data() => match message {
-                Ok(DataPhaseMessage::Transfer(transfer)) if transfer.id == session_id.to_string() => {
-                    incoming_hasher.update(&transfer.bytes);
-                    let n = transfer.bytes.len();
-                    if socket_write.write_all(&transfer.bytes).await.is_err()
-                        || socket_write.flush().await.is_err()
-                    {
-                        session_error("data-transfer", "failed to write to client");
-                        break;
-                    }
-                    incoming_bytes += n;
-                    counter!("p2proxy_download_bytes_total").increment(n as u64);
-                    ctx.events.emit(Events::Bandwidth(BandwidthEvents::Download(session_id, n as u64)));
-                }
-                Ok(DataPhaseMessage::Transfer(_)) => {}
-                Ok(DataPhaseMessage::Close(id)) if id == session_id.to_string() => {
-                    let _ = session.send_close().await;
-                    break;
-                }
-                Ok(DataPhaseMessage::Close(_)) => {}
-                Ok(DataPhaseMessage::Error(e)) => { session_error("data-transfer", e); break; }
-                Err(e) => { session_error("data-transfer", e); break; }
-            }
+    let (writer, reader) = match session.split() {
+        Ok(halves) => halves,
+        Err(e) => {
+            session_error("data-transfer", e);
+            let empty = || Transferred {
+                bytes: 0,
+                hash: blake3::Hasher::new().finalize(),
+            };
+            return (empty(), empty());
         }
-    }
+    };
 
-    let _ = socket_write.flush().await;
-    let _ = socket_write.shutdown().await;
+    let (socket_read, socket_write) = socket.split();
+    let stop = Notify::new();
+    let id = session_id.to_string();
+
+    let on_upload = |n: usize| {
+        counter!("p2proxy_upload_bytes_total").increment(n as u64);
+        ctx.events
+            .emit(Events::Bandwidth(BandwidthEvents::Upload(session_id, n as u64)));
+    };
+    let on_download = |n: usize| {
+        counter!("p2proxy_download_bytes_total").increment(n as u64);
+        ctx.events
+            .emit(Events::Bandwidth(BandwidthEvents::Download(session_id, n as u64)));
+    };
+
+    let (outgoing, incoming) = tokio::join!(
+        copy_into_session(socket_read, writer, &stop, Role::HalfClose, false, on_upload),
+        copy_from_session(reader, socket_write, &id, &stop, Role::Authoritative, on_download),
+    );
+
     (
-        Transferred { bytes: outgoing_bytes, hash: outgoing_hasher.finalize() },
-        Transferred { bytes: incoming_bytes, hash: incoming_hasher.finalize() },
+        Transferred { bytes: outgoing.0, hash: outgoing.1 },
+        Transferred { bytes: incoming.0, hash: incoming.1 },
     )
 }
 
