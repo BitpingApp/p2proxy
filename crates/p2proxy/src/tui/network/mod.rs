@@ -40,6 +40,20 @@ impl Ui {
             return;
         }
 
+        // Surface the latest proxy alert here too — this is where the operator
+        // acts on peers, so a failed manual switch must be visible without
+        // flipping to OVERVIEW.
+        let area = if self.state.last_error.is_some() {
+            let split = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(0), Constraint::Length(4)])
+                .split(area);
+            self.render_error_banner(frame, split[1]);
+            split[0]
+        } else {
+            area
+        };
+
         // Constraint per server: collapsed → 1-line summary
         // (Length(3) for borders+row), expanded → take remaining
         // proportionally (Min(8) floor so it actually shows the table).
@@ -319,16 +333,14 @@ impl Ui {
             ]));
         }
 
-        let title = format!(
-            " ▾ :{}  ({:?}) {} ",
-            server.port,
-            server.protocol,
-            if is_selected {
-                "· [Enter] collapse"
-            } else {
-                ""
-            }
-        );
+        let hint = if !is_selected {
+            ""
+        } else if matches!(self.network_peer_cursor, Some((p, _)) if p == server.port) {
+            "· [↑↓] move  [Enter] change exit  [Esc] back"
+        } else {
+            "· [Enter] choose exit  [Space] collapse"
+        };
+        let title = format!(" ▾ :{}  ({:?}) {hint} ", server.port, server.protocol);
         let border_color = if is_selected { ACCENT } else { BORDER };
         let paragraph = Paragraph::new(lines)
             .block(

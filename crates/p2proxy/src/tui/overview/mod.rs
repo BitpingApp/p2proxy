@@ -1,4 +1,3 @@
-
 use ratatui::{
     prelude::*,
     widgets::{Axis, Block, Borders, Chart, Dataset, Gauge, GraphType, Paragraph, Wrap},
@@ -55,7 +54,7 @@ impl Ui {
         }
     }
 
-    fn render_error_banner(&self, frame: &mut Frame<'_>, area: Rect) {
+    pub(crate) fn render_error_banner(&self, frame: &mut Frame<'_>, area: Rect) {
         let Some(msg) = self.state.last_error.as_deref() else {
             return;
         };

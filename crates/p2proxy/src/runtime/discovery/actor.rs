@@ -9,7 +9,7 @@ use proxy_core::config::Server;
 use proxy_core::domain::connect::{ConnectCtx, ConnectError, ConnectedDestination};
 use proxy_core::events::{DestinationSource, Events};
 use proxy_core::ports::{Actor, EventSink, StickyStore};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use super::event::DiscoveryEvent;
 use crate::runtime::context::Context;
@@ -53,18 +53,18 @@ impl<S: StickyStore> DiscoveryActor<S> {
             .iter()
             .find(|s| s.port == port)
             .cloned()?;
-        info!(port, "running peer discovery");
+        info!(port, reconnect = avoid.is_some(), "selecting an exit peer");
         let result = self.connect(ctx, &server, avoid).await;
         self.emit_sticky_pool(ctx, &server);
         match result {
             Ok(destination) => {
                 let peer = destination.peer;
-                debug!(port, %peer, source = ?destination.source, "discovery adopted exit peer");
+                info!(port, %peer, source = ?destination.source, "exit peer now serving traffic");
                 self.set_destination(ctx, port, destination);
                 Some(peer)
             }
             Err(e) => {
-                debug!(port, error = %e, "discovery found no usable peer");
+                warn!(port, error = %e, "no usable exit peer found");
                 self.clear_destination(ctx, port);
                 None
             }
@@ -92,7 +92,7 @@ impl<S: StickyStore> DiscoveryActor<S> {
             .collect();
 
         if !stale.is_empty() {
-            debug!(%peer, ports = ?stale, "active exit peer disconnected");
+            info!(%peer, ports = ?stale, "active exit peer disconnected");
         }
 
         for port in stale {
@@ -155,7 +155,7 @@ impl<S: StickyStore> DiscoveryActor<S> {
             if !self.sticky.pool(port, &fingerprint).contains(&candidate) {
                 continue;
             }
-            debug!(port, %candidate, "rotating relay-stuck exit to a directly-connected peer");
+            info!(port, %candidate, "swapping relay-stuck exit to a directly-connected peer");
             self.adopt_specific(ctx, &server, candidate, DestinationSource::Sticky)
                 .await;
         }
@@ -166,7 +166,7 @@ impl<S: StickyStore> DiscoveryActor<S> {
     /// so it's never re-adopted, then rediscover a real exit for any port it was
     /// serving (with no sticky-reconnect back to it).
     async fn handle_peer_unusable(&mut self, ctx: &Context, peer: PeerId) {
-        debug!(%peer, "peer cannot serve as an exit; dropping from all pools");
+        info!(%peer, "peer cannot serve as an exit; dropping from all pools");
         let servers: Vec<Server> = ctx.config.servers.clone();
         for server in &servers {
             self.sticky.forget_peer(server.port, peer);
@@ -226,6 +226,7 @@ impl<S: StickyStore> DiscoveryActor<S> {
         let Some(server) = ctx.config.servers.iter().find(|s| s.port == port).cloned() else {
             return;
         };
+        info!(port, %peer, "manual select: dialling chosen exit peer");
         let reached = {
             let gateway = ctx.gateway();
             let mut connect = ConnectCtx {
@@ -240,11 +241,12 @@ impl<S: StickyStore> DiscoveryActor<S> {
         };
         match reached {
             Some(peer) => {
+                info!(port, %peer, "manual select: peer is now the active exit");
                 self.adopt_specific(ctx, &server, peer, DestinationSource::Manual)
                     .await
             }
             None => {
-                debug!(port, %peer, "manual peer select: peer unreachable; active exit unchanged");
+                warn!(port, %peer, "manual select failed: peer unreachable; active exit unchanged");
                 ctx.events.emit(Events::Error(format!(
                     "could not reach peer {peer} for :{port} — active exit unchanged"
                 )));

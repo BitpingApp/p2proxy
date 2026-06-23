@@ -11,7 +11,7 @@ use p2p_protocol::P2pClient;
 use protocols::models::v1::{Bandwidth, Exclusions};
 
 use super::requirements::requirements_from_filters;
-use proxy_core::domain::selection::destination_peer_ids;
+use proxy_core::domain::selection::{destination_peer_ids, is_relayed};
 use proxy_core::events::{ConnectionEvents, Events, PoolPeer};
 use proxy_core::ports::{Actor, EventSink};
 use proxy_core::ports::{DialError, DirectoryError};
@@ -168,9 +168,16 @@ impl NetworkActor {
                     let _ = reply.send(Ok(None));
                     return;
                 }
+                let relayed = addresses.iter().filter(|a| is_relayed(a)).count();
+                info!(
+                    peers = candidates.len(),
+                    direct = addresses.len() - relayed,
+                    relayed,
+                    "dialling exit candidate(s)"
+                );
                 for addr in &addresses {
                     if let Err(e) = self.swarm.dial(addr.clone()) {
-                        warn!(?e, %addr, "failed to dial candidate");
+                        debug!(?e, %addr, "failed to submit dial to swarm");
                     }
                 }
                 self.pending_dials.push(PendingDial {
@@ -205,6 +212,7 @@ impl NetworkActor {
 
                 let relayed = endpoint.is_relayed();
                 let address = endpoint.get_remote_address().clone();
+                info!(%peer_id, %address, relayed, "connection established");
                 if peer_id == ctx.bootstrap_peer_id {
                     self.bootstrap_connected = true;
                     self.bootstrap_dialing = false;
@@ -238,7 +246,8 @@ impl NetworkActor {
                     discovery.peer_closed(peer_id).await;
                 });
             }
-            SwarmEvent::OutgoingConnectionError { peer_id, .. } => {
+            SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
+                debug!(peer = ?peer_id, %error, "outgoing connection failed");
                 if peer_id == Some(ctx.bootstrap_peer_id) {
                     self.bootstrap_dialing = false;
                 }
