@@ -85,6 +85,8 @@ pub enum DestinationSource {
     Sticky,
     /// Fresh attribute-filtered FindNodes discovery.
     Discovered,
+    /// Hand-picked by the operator from the NETWORK tab's rotation pool.
+    Manual,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

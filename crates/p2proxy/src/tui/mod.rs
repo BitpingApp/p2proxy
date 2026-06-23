@@ -3,6 +3,7 @@
 //! under systemd, Docker, or other contexts without a TTY. `Ui::run` is
 //! the public entry point.
 
+use crate::runtime::discovery::DiscoveryHandle;
 use color_eyre::eyre::Result;
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, MouseEventKind},
@@ -10,13 +11,14 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use futures::StreamExt;
+use libp2p::PeerId;
 use proxy_core::config::Config;
 use proxy_core::events::Events;
-use std::sync::Arc;
 use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Paragraph, Tabs},
 };
+use std::sync::Arc;
 use std::{
     io,
     time::{Duration, Instant},
@@ -84,8 +86,22 @@ pub struct Ui {
     /// Defaults to "first server expanded, rest collapsed" so the
     /// tab isn't empty on first open.
     pub(crate) network_expanded: std::collections::HashSet<u16>,
+    /// When `Some((port, row))`, the NETWORK tab is in peer-focus mode for the
+    /// expanded server on `port`, with the row cursor at `row` into that
+    /// server's ordered rotation pool. `None` = server-navigation mode.
+    pub(crate) network_peer_cursor: Option<(u16, usize)>,
+    /// A peer the operator just picked whose switch is in flight. Its row shows
+    /// "dialling" until the exit lands (`ActiveDestination`), the attempt fails
+    /// (`Error`), or the backstop timeout lapses — immediate feedback that the
+    /// keypress registered, since the dial itself can take seconds.
+    pub(crate) network_pending_selection: Option<(u16, PeerId, Instant)>,
     config: Arc<Config>,
 }
+
+/// Backstop for clearing the "dialling" indicator if neither a success nor a
+/// failure event arrives (e.g. the actor was torn down mid-dial). Longer than a
+/// dial timeout so it never clears a still-live attempt.
+const SELECTION_FEEDBACK_TIMEOUT: Duration = Duration::from_secs(30);
 
 impl Ui {
     pub fn new(config: Arc<Config>) -> Self {
@@ -106,6 +122,8 @@ impl Ui {
             export_prompt: tui_components::export::ExportPromptState::new(),
             network_selected_idx: 0,
             network_expanded,
+            network_peer_cursor: None,
+            network_pending_selection: None,
             config,
         }
     }
@@ -175,7 +193,88 @@ impl Ui {
         };
         if !self.network_expanded.remove(&server.port) {
             self.network_expanded.insert(server.port);
+        } else if matches!(self.network_peer_cursor, Some((p, _)) if p == server.port) {
+            // Collapsing the focused server can't leave an invisible cursor.
+            self.network_peer_cursor = None;
         }
+    }
+
+    /// Up/k on the NETWORK tab: move the peer-row cursor in peer-focus mode,
+    /// otherwise move between servers.
+    pub fn network_up(&mut self) {
+        if self.network_peer_cursor.is_some() {
+            self.network_cursor_step(-1);
+        } else {
+            self.network_select_prev();
+        }
+    }
+
+    /// Down/j on the NETWORK tab: symmetric to `network_up`.
+    pub fn network_down(&mut self) {
+        if self.network_peer_cursor.is_some() {
+            self.network_cursor_step(1);
+        } else {
+            self.network_select_next();
+        }
+    }
+
+    /// Move the peer-row cursor, clamped to the live pool (no wrap — wrapping a
+    /// pinning list is a foot-gun). Clears the cursor if the pool emptied.
+    fn network_cursor_step(&mut self, delta: isize) {
+        let Some((port, idx)) = self.network_peer_cursor else {
+            return;
+        };
+        let len = self.state.ordered_pool_for(port).len();
+        let Some(last) = len.checked_sub(1) else {
+            self.network_peer_cursor = None;
+            return;
+        };
+        let cur = idx.min(last);
+        let next = if delta < 0 {
+            cur.saturating_sub(1)
+        } else {
+            (cur + 1).min(last)
+        };
+        self.network_peer_cursor = Some((port, next));
+    }
+
+    /// Enter the focused server's rotation pool (Right / Enter-on-expanded).
+    /// No-op unless the server is expanded with at least one peer.
+    pub fn network_enter_peer_focus(&mut self) {
+        let Some(server) = self.config.servers.get(self.network_selected_idx) else {
+            return;
+        };
+        let port = server.port;
+        if self.network_expanded.contains(&port) && !self.state.ordered_pool_for(port).is_empty() {
+            self.network_peer_cursor = Some((port, 0));
+        }
+    }
+
+    /// Leave peer-focus mode, back to server navigation (Esc / Left).
+    pub fn network_exit_peer_focus(&mut self) {
+        self.network_peer_cursor = None;
+    }
+
+    /// Enter on the NETWORK tab. In peer-focus mode, returns the
+    /// `(port, peer)` to pin as the active exit; otherwise expands a collapsed
+    /// server or steps into peer-focus on an expanded one, and returns `None`.
+    pub fn network_enter(&mut self) -> Option<(u16, PeerId)> {
+        if let Some((port, idx)) = self.network_peer_cursor {
+            return self
+                .state
+                .ordered_pool_for(port)
+                .get(idx)
+                .map(|p| (port, *p));
+        }
+        let Some(server) = self.config.servers.get(self.network_selected_idx) else {
+            return None;
+        };
+        let port = server.port;
+        if self.network_expanded.insert(port) {
+            return None;
+        }
+        self.network_enter_peer_focus();
+        None
     }
 
     pub fn next_tab(&mut self) {
@@ -190,6 +289,7 @@ impl Ui {
     // Main function that sets up and runs the UI
     pub async fn run_ui(
         mut state_events: Receiver<Events>,
+        discovery: DiscoveryHandle,
         shutdown: tokio_util::sync::CancellationToken,
         config: Arc<Config>,
     ) -> Result<()> {
@@ -295,50 +395,58 @@ impl Ui {
                             KeyCode::Char('l') => ui.toggle_logs(),
                             KeyCode::Tab => ui.next_tab(),
                             KeyCode::BackTab => ui.previous_tab(),
-                            KeyCode::Up => {
-                                // Network tab: cycle the focused server
-                                // up (wraps). Other tabs: no-op (the
-                                // logs pane handles its own scrolling
-                                // via TuiWidgetState).
+                            KeyCode::Up | KeyCode::Char('k') => {
+                                // Network tab: peer-row cursor in peer-focus
+                                // mode, else move between servers. Other tabs
+                                // let the logs pane handle its own scrolling.
                                 if ui.tab_index == 1 {
-                                    ui.network_select_prev();
+                                    ui.network_up();
                                 }
                                 ui.mark_dirty();
                             }
-                            KeyCode::Char('j') => {
-                                // vim-style down for navigation in
-                                // network tab. Keeps parity with the
-                                // logs pane's j/k.
+                            KeyCode::Down | KeyCode::Char('j') => {
                                 if ui.tab_index == 1 {
-                                    ui.network_select_next();
+                                    ui.network_down();
                                 }
                                 ui.mark_dirty();
                             }
-                            KeyCode::Char('k') => {
-                                if ui.tab_index == 1 {
-                                    ui.network_select_prev();
-                                }
-                                ui.mark_dirty();
-                            }
-                            KeyCode::Enter | KeyCode::Char(' ') => {
-                                // Toggle expansion of the focused
-                                // server in NETWORK. No-op elsewhere.
+                            KeyCode::Char(' ') => {
+                                // Expand/collapse the focused server.
                                 if ui.tab_index == 1 {
                                     ui.network_toggle_expand_selected();
                                 }
                                 ui.mark_dirty();
                             }
-                            KeyCode::Down => {
-                                // Network tab: cycle focus down. Same
-                                // wraparound behaviour as Up.
+                            KeyCode::Enter => {
+                                // Expand → step into the pool → pin the peer
+                                // under the cursor as this server's exit.
                                 if ui.tab_index == 1 {
-                                    ui.network_select_next();
+                                    if let Some((port, peer)) = ui.network_enter() {
+                                        // Show "dialling" on the row right away —
+                                        // the actual switch is async and can take
+                                        // seconds. Fire-and-forget so the render
+                                        // loop never blocks; the repaint to
+                                        // "active" comes via ActiveDestination.
+                                        ui.network_pending_selection =
+                                            Some((port, peer, Instant::now()));
+                                        let discovery = discovery.clone();
+                                        tokio::spawn(async move {
+                                            discovery.select_peer(port, peer).await;
+                                        });
+                                    }
                                 }
-                                let _ = ();
-                                // (legacy session-selection branch
-                                // intentionally removed — see
-                                // `Up` arm for the new behaviour.)
-                                // }).await;
+                                ui.mark_dirty();
+                            }
+                            KeyCode::Right => {
+                                if ui.tab_index == 1 {
+                                    ui.network_enter_peer_focus();
+                                }
+                                ui.mark_dirty();
+                            }
+                            KeyCode::Esc | KeyCode::Left => {
+                                if ui.tab_index == 1 {
+                                    ui.network_exit_peer_focus();
+                                }
                                 ui.mark_dirty();
                             }
                             _ => {}
@@ -490,6 +598,9 @@ impl Ui {
                 }
             },
             Events::Error(message) => {
+                // A failed manual switch surfaces as an error — stop showing
+                // "dialling" for it.
+                self.network_pending_selection = None;
                 self.state.last_error = Some(message);
             }
             Events::ServerPool { port, peers } => {
@@ -538,6 +649,10 @@ impl Ui {
                 self.state.note_peer_address(peer_id, address, source);
             }
             Events::ActiveDestination { port, peer, source } => {
+                // The switch for this port resolved — clear any "dialling" hint.
+                if matches!(self.network_pending_selection, Some((p, _, _)) if p == port) {
+                    self.network_pending_selection = None;
+                }
                 match peer {
                     Some(p) => {
                         self.state.peers.insert(p);
@@ -574,8 +689,11 @@ impl Ui {
                 // exit in sticky_peers.json — not just the active one.
                 for pp in &peers {
                     if let Some(addr) = pp.addresses.first() {
-                        self.state
-                            .note_peer_address(pp.peer_id, addr.clone(), AddrSource::Candidate);
+                        self.state.note_peer_address(
+                            pp.peer_id,
+                            addr.clone(),
+                            AddrSource::Candidate,
+                        );
                     }
                 }
                 self.state
@@ -614,6 +732,11 @@ impl Ui {
     }
 
     pub fn render(&mut self, frame: &mut Frame<'_>) {
+        if matches!(self.network_pending_selection, Some((_, _, since)) if since.elapsed() > SELECTION_FEEDBACK_TIMEOUT)
+        {
+            self.network_pending_selection = None;
+        }
+
         // Create the main layout
         let size = frame.area();
         let chunks = Layout::default()
@@ -684,10 +807,11 @@ impl Ui {
             .title(" P2PROXY ")
             .title_alignment(Alignment::Center)
             .style(Style::default().bg(BACKGROUND));
-        let body = Paragraph::new("\n\nShutting down…\n\ndisconnecting peers and closing listeners")
-            .alignment(Alignment::Center)
-            .style(Style::default().fg(FOREGROUND))
-            .block(block);
+        let body =
+            Paragraph::new("\n\nShutting down…\n\ndisconnecting peers and closing listeners")
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(FOREGROUND))
+                .block(block);
         frame.render_widget(body, area);
     }
 
@@ -748,7 +872,10 @@ mod tests {
         ));
 
         ui.handle_swarm_events(Events::Error("no peers match filter".into()));
-        assert_eq!(ui.state.last_error.as_deref(), Some("no peers match filter"));
+        assert_eq!(
+            ui.state.last_error.as_deref(),
+            Some("no peers match filter")
+        );
 
         ui.handle_swarm_events(Events::Connection(ConnectionEvents::Disconnected(p)));
         assert!(!ui.state.peers.contains(&p));

@@ -6,7 +6,7 @@ use libp2p::{Multiaddr, PeerId};
 use crate::config::{DestinationPeerEntry, Server, StickyReconnect};
 use crate::domain::backoff::Backoff;
 use crate::domain::circuit::synthesize_circuit;
-use crate::domain::selection::candidate_routes;
+use crate::domain::selection::{candidate_routes, partition_direct_first};
 use thiserror::Error;
 
 use crate::events::{DestinationSource, Events, PinnedPeerStatus};
@@ -35,7 +35,10 @@ mod connect_error_tests {
     #[test]
     fn directory_error_converts_into_connect_error() {
         let e: ConnectError = DirectoryError::Timeout.into();
-        assert!(matches!(e, ConnectError::Directory(DirectoryError::Timeout)));
+        assert!(matches!(
+            e,
+            ConnectError::Directory(DirectoryError::Timeout)
+        ));
     }
 }
 const STICKY_RECONNECT_ATTEMPTS: usize = 3;
@@ -159,10 +162,7 @@ where
             }
         }
 
-        if let Some(peer) = self
-            .connect_sticky_pool(server, &fingerprint, avoid)
-            .await
-        {
+        if let Some(peer) = self.connect_sticky_pool(server, &fingerprint, avoid).await {
             self.remember(server, &fingerprint, peer);
             return Ok(sticky(peer));
         }
@@ -269,6 +269,14 @@ where
         None
     }
 
+    /// Reach one operator-chosen peer for a manual switch: the same reachability
+    /// effort as a sticky reconnect (remembered direct address, hub routes, then
+    /// a relay circuit — direct-first via `dial`), with no discovery. Returns the
+    /// peer when a connection lands.
+    pub async fn reach_specific_peer(&mut self, server: &Server, peer: PeerId) -> Option<PeerId> {
+        self.try_reach_peer(server, peer).await
+    }
+
     /// One reconnect attempt for a known peer. Its remembered direct address,
     /// the hub's current routes, and (when the hub can't answer) a synthesized
     /// relay circuit are dialed together in a single race. A stale remembered
@@ -306,11 +314,27 @@ where
         }
     }
 
+    /// Direct routes are raced first; relay circuits are dialed only when no
+    /// direct route connects, so a relay is always a last resort. A NAT'd peer
+    /// that only advertises a `/p2p-circuit` route still connects (empty direct
+    /// set short-circuits), and DCUtR later upgrades it to a direct link.
     async fn dial(&self, addresses: HashSet<Multiaddr>) -> Option<PeerId> {
+        let (direct, relay) = partition_direct_first(addresses);
+        if let Some(peer) = self.dial_set(direct).await {
+            return Some(peer);
+        }
+        self.dial_set(relay).await
+    }
+
+    async fn dial_set(&self, addresses: Vec<Multiaddr>) -> Option<PeerId> {
         if addresses.is_empty() {
             return None;
         }
-        self.dialer.dial_and_wait(addresses).await.ok().flatten()
+        self.dialer
+            .dial_and_wait(addresses.into_iter().collect())
+            .await
+            .ok()
+            .flatten()
     }
 
     fn remember(&mut self, server: &Server, fingerprint: &str, peer: PeerId) {
@@ -335,7 +359,8 @@ where
                 resolvable: !candidate_routes(entry, resolved).is_empty(),
             })
             .collect();
-        self.events.emit(Events::PinnedPeerStatuses { port, statuses });
+        self.events
+            .emit(Events::PinnedPeerStatuses { port, statuses });
     }
 }
 
@@ -351,7 +376,9 @@ mod tests {
     use super::*;
     use crate::domain::sticky::StickyState;
     use crate::events::PoolPeer;
-    use crate::testing::builders::{direct_addr, discovery_server, peer, pinned_server, relay_addr};
+    use crate::testing::builders::{
+        direct_addr, discovery_server, peer, pinned_server, relay_addr,
+    };
     use crate::testing::fakes::{FakeClock, FakeDialer, FakeDirectory, RecordingSink};
     use futures::executor::block_on;
     use std::collections::HashMap;
@@ -396,16 +423,48 @@ mod tests {
         let (clk, sink, relay) = (FakeClock::new(), RecordingSink::new(), relay_addr());
         let mut sticky = StickyState::default();
 
-        let dest = run(&server, None, &dir, &dl, &clk, &sink, &mut sticky, &relay).expect("connects");
+        let dest =
+            run(&server, None, &dir, &dl, &clk, &sink, &mut sticky, &relay).expect("connects");
         assert_eq!(dest.peer, p);
         assert_eq!(dest.source, DestinationSource::Discovered);
-        assert_eq!(sticky.pool(1080, &fp), vec![p], "adopted peer is remembered");
+        assert_eq!(
+            sticky.pool(1080, &fp),
+            vec![p],
+            "adopted peer is remembered"
+        );
         assert!(
             sink.events()
                 .iter()
                 .any(|e| matches!(e, Events::ServerPool { .. })),
             "pool surfaced to the TUI"
         );
+    }
+
+    #[test]
+    fn direct_route_preferred_over_relay_circuit() {
+        // A candidate reachable both directly and via a relay circuit. The
+        // direct route must win and the relay set must never be dialed (relay is
+        // a last resort), so exactly one dial happens.
+        let p = peer();
+        let server = discovery_server(1080);
+        let direct = direct_addr(p);
+        let circuit: Multiaddr = format!("/dns4/boot.example.com/tcp/45445/p2p-circuit/p2p/{p}")
+            .parse()
+            .expect("circuit addr");
+        let both = PoolPeer {
+            peer_id: p,
+            addresses: vec![direct.clone(), circuit],
+        };
+        let dir = FakeDirectory::new().queue_find(vec![Ok(vec![both])]);
+        let dl = FakeDialer::reachable_addresses([direct]);
+        let (clk, sink, relay) = (FakeClock::new(), RecordingSink::new(), relay_addr());
+        let mut sticky = StickyState::default();
+
+        let dest = run(&server, None, &dir, &dl, &clk, &sink, &mut sticky, &relay)
+            .expect("connects on the direct route");
+        assert_eq!(dest.peer, p);
+        assert_eq!(dest.source, DestinationSource::Discovered);
+        assert_eq!(dl.dial_count(), 1, "direct won; relay circuit never dialed");
     }
 
     #[test]
@@ -417,7 +476,8 @@ mod tests {
         let (clk, sink, relay) = (FakeClock::new(), RecordingSink::new(), relay_addr());
         let mut sticky = StickyState::default();
 
-        let dest = run(&server, None, &dir, &dl, &clk, &sink, &mut sticky, &relay).expect("connects");
+        let dest =
+            run(&server, None, &dir, &dl, &clk, &sink, &mut sticky, &relay).expect("connects");
         assert_eq!(dest.peer, p);
         assert!(dir.find_calls() >= 2);
         assert!(clk.sleeps().contains(&Duration::from_secs(1)));
@@ -474,11 +534,16 @@ mod tests {
         let dl = FakeDialer::reachable([p]);
         let (clk, sink, relay) = (FakeClock::new(), RecordingSink::new(), relay_addr());
 
-        let dest = run(&server, None, &dir, &dl, &clk, &sink, &mut sticky, &relay).expect("connects");
+        let dest =
+            run(&server, None, &dir, &dl, &clk, &sink, &mut sticky, &relay).expect("connects");
         assert_eq!(dest.peer, p);
         assert_eq!(dest.source, DestinationSource::Sticky);
         assert_eq!(dir.find_calls(), 0, "remembered peer needs no discovery");
-        assert_eq!(dl.dial_count(), 1, "remembered + hub routes raced in one dial");
+        assert_eq!(
+            dl.dial_count(),
+            1,
+            "remembered + hub routes raced in one dial"
+        );
     }
 
     #[test]
@@ -490,7 +555,9 @@ mod tests {
         let p = peer();
         let server = discovery_server(1080);
         let fp = server.peer_options.filter_fingerprint(1080);
-        let stale: Multiaddr = format!("/ip4/203.0.113.7/tcp/9/p2p/{p}").parse().expect("addr");
+        let stale: Multiaddr = format!("/ip4/203.0.113.7/tcp/9/p2p/{p}")
+            .parse()
+            .expect("addr");
         let fresh = direct_addr(p);
         let mut sticky = StickyState::default();
         sticky.remember(1080, &fp, p, 5);
@@ -503,7 +570,11 @@ mod tests {
             .expect("reconnects on the fresh route despite the stale remembered address");
         assert_eq!(dest.peer, p);
         assert_eq!(dest.source, DestinationSource::Sticky);
-        assert_eq!(dl.dial_count(), 1, "stale + fresh raced in one dial, not serially");
+        assert_eq!(
+            dl.dial_count(),
+            1,
+            "stale + fresh raced in one dial, not serially"
+        );
     }
 
     #[test]
@@ -536,11 +607,24 @@ mod tests {
         let dl = FakeDialer::reachable([fresh]);
         let (clk, sink, relay) = (FakeClock::new(), RecordingSink::new(), relay_addr());
 
-        let dest = run(&server, Some(old), &dir, &dl, &clk, &sink, &mut sticky, &relay)
-            .expect("rotates to a fresh peer");
+        let dest = run(
+            &server,
+            Some(old),
+            &dir,
+            &dl,
+            &clk,
+            &sink,
+            &mut sticky,
+            &relay,
+        )
+        .expect("rotates to a fresh peer");
         assert_eq!(dest.peer, fresh);
         assert_eq!(dest.source, DestinationSource::Discovered);
-        assert_eq!(sticky.pool(1080, &fp), vec![fresh], "old forgotten, fresh remembered");
+        assert_eq!(
+            sticky.pool(1080, &fp),
+            vec![fresh],
+            "old forgotten, fresh remembered"
+        );
         assert_eq!(
             clk.sleeps()[..2],
             [Duration::from_secs(1), Duration::from_secs(2)],
@@ -557,7 +641,8 @@ mod tests {
         let (clk, sink, relay) = (FakeClock::new(), RecordingSink::new(), relay_addr());
         let mut sticky = StickyState::default();
 
-        let dest = run(&server, None, &dir, &dl, &clk, &sink, &mut sticky, &relay).expect("connects");
+        let dest =
+            run(&server, None, &dir, &dl, &clk, &sink, &mut sticky, &relay).expect("connects");
         assert_eq!(dest.peer, a);
         assert_eq!(dest.source, DestinationSource::Pinned { rank: 0 });
         assert!(
@@ -571,13 +656,16 @@ mod tests {
     fn pinned_fails_over_to_rank1() {
         let (a, b) = (peer(), peer());
         let server = pinned_server(1080, vec![a, b]);
-        let dir = FakeDirectory::new()
-            .with_resolved(HashMap::from([(a, vec![direct_addr(a)]), (b, vec![direct_addr(b)])]));
+        let dir = FakeDirectory::new().with_resolved(HashMap::from([
+            (a, vec![direct_addr(a)]),
+            (b, vec![direct_addr(b)]),
+        ]));
         let dl = FakeDialer::reachable([b]);
         let (clk, sink, relay) = (FakeClock::new(), RecordingSink::new(), relay_addr());
         let mut sticky = StickyState::default();
 
-        let dest = run(&server, None, &dir, &dl, &clk, &sink, &mut sticky, &relay).expect("connects");
+        let dest =
+            run(&server, None, &dir, &dl, &clk, &sink, &mut sticky, &relay).expect("connects");
         assert_eq!(dest.peer, b);
         assert_eq!(dest.source, DestinationSource::Pinned { rank: 1 });
     }
@@ -594,7 +682,10 @@ mod tests {
         let res = run(&server, None, &dir, &dl, &clk, &sink, &mut sticky, &relay);
         assert!(matches!(
             res,
-            Err(ConnectError::PinnedExhausted { port: 1080, count: 1 })
+            Err(ConnectError::PinnedExhausted {
+                port: 1080,
+                count: 1
+            })
         ));
         assert_eq!(clk.sleeps().len(), MAX_PINNED_PASSES);
         assert!(!sink.errors().is_empty());
@@ -611,7 +702,8 @@ mod tests {
         let (clk, sink, relay) = (FakeClock::new(), RecordingSink::new(), relay_addr());
         let mut sticky = StickyState::default();
 
-        let dest = run(&server, None, &dir, &dl, &clk, &sink, &mut sticky, &relay).expect("connects");
+        let dest =
+            run(&server, None, &dir, &dl, &clk, &sink, &mut sticky, &relay).expect("connects");
         assert_eq!(dest.peer, fresh);
         assert_eq!(dest.source, DestinationSource::Discovered);
     }

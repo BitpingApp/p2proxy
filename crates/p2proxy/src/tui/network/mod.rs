@@ -1,7 +1,7 @@
 use libp2p::{Multiaddr, multiaddr::Protocol};
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap},
+    widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState, Wrap},
 };
 
 use super::{ACCENT, BACKGROUND, BORDER, FOREGROUND, PRIMARY, SECONDARY, SUCCESS, Ui, WARN};
@@ -231,7 +231,10 @@ impl Ui {
                             format!("pinned[{rank}]")
                         }
                         proxy_core::events::DestinationSource::Sticky => "sticky".to_string(),
-                        proxy_core::events::DestinationSource::Discovered => "discovered".to_string(),
+                        proxy_core::events::DestinationSource::Discovered => {
+                            "discovered".to_string()
+                        }
+                        proxy_core::events::DestinationSource::Manual => "manual".to_string(),
                     };
                     spans.push(Span::styled("  ·  ", Style::default().fg(BORDER)));
                     spans.push(Span::styled(badge, Style::default().fg(PRIMARY)));
@@ -350,21 +353,16 @@ impl Ui {
         area: Rect,
         server: &proxy_core::config::Server,
     ) {
-        let mut pool = self
-            .state
-            .server_pools
-            .get(&server.port)
-            .cloned()
-            .unwrap_or_default();
-        // Surface every remembered sticky exit, not just the active one or the
-        // peers in the latest FindNodes set.
-        for peer in self.state.sticky_pools.get(&server.port).into_iter().flatten() {
-            if !pool.contains(peer) {
-                pool.push(*peer);
-            }
-        }
-
+        let pool = self.state.ordered_pool_for(server.port);
         let active = self.state.active_destinations.get(&server.port).copied();
+        let cursor = match self.network_peer_cursor {
+            Some((port, idx)) if port == server.port => Some(idx),
+            _ => None,
+        };
+        let pending = match self.network_pending_selection {
+            Some((port, peer, _)) if port == server.port => Some(peer),
+            _ => None,
+        };
 
         let header = Row::new(
             ["", "Peer ID", "Address", "Status", "↑ bytes", "↓ bytes"]
@@ -391,8 +389,17 @@ impl Ui {
             ]
         } else {
             pool.into_iter()
-                .map(|peer_id| {
+                .enumerate()
+                .map(|(row_idx, peer_id)| {
                     let is_active = active == Some(peer_id);
+                    let is_cursor = cursor == Some(row_idx);
+                    // A peer whose manual switch is in flight, not yet the live
+                    // exit — shown as "dialling" so the keypress has feedback.
+                    let is_dialling = !is_active && pending == Some(peer_id);
+                    let is_relay_only = matches!(
+                        self.state.peer_addresses.get(&peer_id).map(|a| a.source),
+                        Some(AddrSource::Relayed)
+                    );
                     let bytes = self
                         .state
                         .peer_bandwidth
@@ -405,17 +412,25 @@ impl Ui {
                             "active",
                             Style::default().fg(SUCCESS).add_modifier(Modifier::BOLD),
                         )
+                    } else if is_dialling {
+                        (
+                            "⋯",
+                            "dialling",
+                            Style::default().fg(WARN).add_modifier(Modifier::BOLD),
+                        )
                     } else {
                         ("·", "standby", Style::default().fg(BORDER))
                     };
                     let id_style = if is_active {
                         Style::default().fg(SUCCESS).add_modifier(Modifier::BOLD)
+                    } else if is_dialling {
+                        Style::default().fg(WARN)
                     } else {
                         Style::default().fg(FOREGROUND)
                     };
                     let (addr_text, addr_style) =
                         addr_cell(self.state.peer_addresses.get(&peer_id), is_active);
-                    Row::new(vec![
+                    let row = Row::new(vec![
                         Cell::from(marker).style(status_style),
                         Cell::from(peer_id.to_string()).style(id_style),
                         Cell::from(addr_text).style(addr_style),
@@ -423,7 +438,17 @@ impl Ui {
                         Cell::from(human_bytes(bytes.0)).style(Style::default().fg(ACCENT)),
                         Cell::from(human_bytes(bytes.1)).style(Style::default().fg(ACCENT)),
                     ])
-                    .height(1)
+                    .height(1);
+                    // Cursor row is highlighted; a relay-only standby peer is
+                    // dimmed so it's visibly the last-resort pick (but not while
+                    // it's the dialling target — that needs to stay legible).
+                    if is_cursor {
+                        row.style(Style::default().add_modifier(Modifier::REVERSED))
+                    } else if is_relay_only && !is_active && !is_dialling {
+                        row.style(Style::default().add_modifier(Modifier::DIM))
+                    } else {
+                        row
+                    }
                 })
                 .collect()
         };
@@ -448,7 +473,13 @@ impl Ui {
                     .title(Span::styled(" rotation pool ", Style::default().fg(ACCENT))),
             )
             .style(Style::default().bg(BACKGROUND).fg(FOREGROUND));
-        frame.render_widget(table, area);
+        // Drive scrolling off the cursor: a fresh state with the selected row
+        // each frame lets ratatui offset the viewport so the cursor stays
+        // visible on a pool longer than the pane. The visible highlight is the
+        // row's own REVERSED style, so no highlight_style is set here.
+        let mut table_state = TableState::default();
+        table_state.select(cursor);
+        frame.render_stateful_widget(table, area, &mut table_state);
     }
 }
 

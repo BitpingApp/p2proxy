@@ -7,7 +7,7 @@ use arc_swap::ArcSwap;
 use libp2p::{Multiaddr, PeerId};
 use proxy_core::config::Server;
 use proxy_core::domain::connect::{ConnectCtx, ConnectError, ConnectedDestination};
-use proxy_core::events::Events;
+use proxy_core::events::{DestinationSource, Events};
 use proxy_core::ports::{Actor, EventSink, StickyStore};
 use tracing::{debug, info};
 
@@ -26,6 +26,7 @@ pub struct DiscoveryActor<S: StickyStore> {
     destinations: HashMap<u16, DestinationHandle>,
     last_rediscovery: HashMap<u16, Instant>,
     pending_rediscovery: HashSet<u16>,
+    direct_peers: HashSet<PeerId>,
 }
 
 impl<S: StickyStore> DiscoveryActor<S> {
@@ -35,12 +36,23 @@ impl<S: StickyStore> DiscoveryActor<S> {
             destinations,
             last_rediscovery: HashMap::new(),
             pending_rediscovery: HashSet::new(),
+            direct_peers: HashSet::new(),
         }
     }
 
-    async fn discover(&mut self, ctx: &Context, port: u16, avoid: Option<PeerId>) -> Option<PeerId> {
+    async fn discover(
+        &mut self,
+        ctx: &Context,
+        port: u16,
+        avoid: Option<PeerId>,
+    ) -> Option<PeerId> {
         self.pending_rediscovery.remove(&port);
-        let server = ctx.config.servers.iter().find(|s| s.port == port).cloned()?;
+        let server = ctx
+            .config
+            .servers
+            .iter()
+            .find(|s| s.port == port)
+            .cloned()?;
         info!(port, "running peer discovery");
         let result = self.connect(ctx, &server, avoid).await;
         self.emit_sticky_pool(ctx, &server);
@@ -71,6 +83,7 @@ impl<S: StickyStore> DiscoveryActor<S> {
     }
 
     async fn handle_peer_closed(&mut self, ctx: &Context, peer: PeerId) {
+        self.direct_peers.remove(&peer);
         let stale: Vec<u16> = self
             .destinations
             .iter()
@@ -120,6 +133,34 @@ impl<S: StickyStore> DiscoveryActor<S> {
         self.sticky.note_direct_address(peer, address);
     }
 
+    /// `candidate` just became reachable directly. For any port whose active
+    /// exit is still relay-only — and where `candidate` is already a member of
+    /// that port's pool — rotate the egress onto it. Relay is a last resort,
+    /// never the steady state, so a directly-connected alternative always wins.
+    async fn rotate_off_relay_if_better(&mut self, ctx: &Context, candidate: PeerId) {
+        let relay_stuck: Vec<u16> = self
+            .destinations
+            .iter()
+            .filter(|(_, handle)| {
+                matches!(**handle.load(), Some(active) if active != candidate && !self.direct_peers.contains(&active))
+            })
+            .map(|(port, _)| *port)
+            .collect();
+
+        for port in relay_stuck {
+            let Some(server) = ctx.config.servers.iter().find(|s| s.port == port).cloned() else {
+                continue;
+            };
+            let fingerprint = server.peer_options.filter_fingerprint(port);
+            if !self.sticky.pool(port, &fingerprint).contains(&candidate) {
+                continue;
+            }
+            debug!(port, %candidate, "rotating relay-stuck exit to a directly-connected peer");
+            self.adopt_specific(ctx, &server, candidate, DestinationSource::Sticky)
+                .await;
+        }
+    }
+
     /// A peer that can't serve as an exit — it doesn't speak the proxy protocol
     /// (e.g. a hub) or runs an incompatible forwarder. Drop it from every pool
     /// so it's never re-adopted, then rediscover a real exit for any port it was
@@ -162,6 +203,55 @@ impl<S: StickyStore> DiscoveryActor<S> {
         connect.connect(server, avoid).await
     }
 
+    /// Switch a server's active exit to `peer`, reusing the same machinery as
+    /// any other switch: remember it MRU and store it as the destination. Used
+    /// by both manual selection and the relay-stuck rotation.
+    async fn adopt_specific(
+        &mut self,
+        ctx: &Context,
+        server: &Server,
+        peer: PeerId,
+        source: DestinationSource,
+    ) {
+        let fingerprint = server.peer_options.filter_fingerprint(server.port);
+        self.sticky
+            .remember(server.port, &fingerprint, peer, server.pool.max_total);
+        self.set_destination(ctx, server.port, ConnectedDestination { peer, source });
+        self.emit_sticky_pool(ctx, server);
+    }
+
+    /// Honour an operator's hand-picked exit: reach the peer (no discovery), then
+    /// adopt it. If it can't be reached, leave the current exit untouched.
+    async fn select_peer(&mut self, ctx: &Context, port: u16, peer: PeerId) {
+        let Some(server) = ctx.config.servers.iter().find(|s| s.port == port).cloned() else {
+            return;
+        };
+        let reached = {
+            let gateway = ctx.gateway();
+            let mut connect = ConnectCtx {
+                directory: &gateway,
+                dialer: &gateway,
+                clock: &ctx.clock,
+                sticky: &mut self.sticky,
+                events: &ctx.events,
+                relay_address: &ctx.relay_address,
+            };
+            connect.reach_specific_peer(&server, peer).await
+        };
+        match reached {
+            Some(peer) => {
+                self.adopt_specific(ctx, &server, peer, DestinationSource::Manual)
+                    .await
+            }
+            None => {
+                debug!(port, %peer, "manual peer select: peer unreachable; active exit unchanged");
+                ctx.events.emit(Events::Error(format!(
+                    "could not reach peer {peer} for :{port} — active exit unchanged"
+                )));
+            }
+        }
+    }
+
     fn set_destination(&self, ctx: &Context, port: u16, destination: ConnectedDestination) {
         if let Some(handle) = self.destinations.get(&port) {
             handle.store(Arc::new(Some(destination.peer)));
@@ -202,8 +292,21 @@ impl<S: StickyStore + Send + Sync> Actor for DiscoveryActor<S> {
             }
             DiscoveryEvent::PeerClosed(peer) => self.handle_peer_closed(ctx, peer).await,
             DiscoveryEvent::PeerUnusable(peer) => self.handle_peer_unusable(ctx, peer).await,
-            DiscoveryEvent::PeerConnectedDirect { peer, address } => {
-                self.promote_direct(peer, address)
+            DiscoveryEvent::PeerConnected {
+                peer,
+                address,
+                relayed,
+            } => {
+                if relayed {
+                    self.direct_peers.remove(&peer);
+                } else {
+                    self.direct_peers.insert(peer);
+                    self.promote_direct(peer, address);
+                    self.rotate_off_relay_if_better(ctx, peer).await;
+                }
+            }
+            DiscoveryEvent::SelectPeer { port, peer_id } => {
+                self.select_peer(ctx, port, peer_id).await
             }
         }
         Ok(())
@@ -212,8 +315,8 @@ impl<S: StickyStore + Send + Sync> Actor for DiscoveryActor<S> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::DiscoveryHandle;
+    use super::*;
     use crate::adapters::channel_sink::ChannelSink;
     use crate::adapters::tokio_clock::TokioClock;
     use crate::runtime::network::{NetworkCommand, NetworkHandle};
@@ -261,7 +364,9 @@ mod tests {
                     }]));
                 }
                 NetworkCommand::Dial { addresses, reply } => {
-                    let hit = destination_peer_ids(&addresses).contains(&exit).then_some(exit);
+                    let hit = destination_peer_ids(&addresses)
+                        .contains(&exit)
+                        .then_some(exit);
                     let _ = reply.send(Ok(hit));
                 }
                 NetworkCommand::ResolvePeers { reply, .. } => {
@@ -346,5 +451,145 @@ mod tests {
             saw_sticky_pool,
             "remembered sticky pool surfaced to the NETWORK tab"
         );
+    }
+
+    /// A pool member coming up directly must pull a relay-stuck active exit onto
+    /// it — relay is a last resort, never the steady state.
+    #[tokio::test]
+    async fn relay_stuck_active_rotates_to_direct_peer() {
+        let relay_peer = peer();
+        let direct_peer = peer();
+        let (net_tx, net_rx) = mpsc::channel::<NetworkCommand>(16);
+        let (ev_tx, _ev_rx) = mpsc::channel::<Events>(64);
+        tokio::spawn(fake_network(net_rx, direct_peer, direct_addr(direct_peer)));
+        let ctx = context(
+            NetworkHandle::new(net_tx),
+            ChannelSink::new(ev_tx),
+            test_config(),
+        );
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fp = test_config().servers[0]
+            .peer_options
+            .filter_fingerprint(1080);
+        let mut store =
+            crate::adapters::file_sticky::FileStickyStore::load(dir.path().join("sticky.json"));
+        store.remember(1080, &fp, direct_peer, 10);
+
+        let destination: DestinationHandle = Arc::new(ArcSwap::from_pointee(Some(relay_peer)));
+        let mut destinations = HashMap::new();
+        destinations.insert(1080u16, destination.clone());
+        let mut actor = DiscoveryActor::new(store, destinations);
+
+        let _ = actor
+            .handle(
+                &ctx,
+                DiscoveryEvent::PeerConnected {
+                    peer: direct_peer,
+                    address: direct_addr(direct_peer),
+                    relayed: false,
+                },
+            )
+            .await;
+
+        assert_eq!(
+            **destination.load(),
+            Some(direct_peer),
+            "rotated off the relay-stuck exit onto the directly-connected peer"
+        );
+    }
+
+    /// The same pool member coming up *relayed* must NOT rotate — only a direct
+    /// connection demotes the incumbent.
+    #[tokio::test]
+    async fn relayed_connection_does_not_rotate() {
+        let relay_peer = peer();
+        let other_peer = peer();
+        let (net_tx, net_rx) = mpsc::channel::<NetworkCommand>(16);
+        let (ev_tx, _ev_rx) = mpsc::channel::<Events>(64);
+        tokio::spawn(fake_network(net_rx, other_peer, direct_addr(other_peer)));
+        let ctx = context(
+            NetworkHandle::new(net_tx),
+            ChannelSink::new(ev_tx),
+            test_config(),
+        );
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fp = test_config().servers[0]
+            .peer_options
+            .filter_fingerprint(1080);
+        let mut store =
+            crate::adapters::file_sticky::FileStickyStore::load(dir.path().join("sticky.json"));
+        store.remember(1080, &fp, other_peer, 10);
+
+        let destination: DestinationHandle = Arc::new(ArcSwap::from_pointee(Some(relay_peer)));
+        let mut destinations = HashMap::new();
+        destinations.insert(1080u16, destination.clone());
+        let mut actor = DiscoveryActor::new(store, destinations);
+
+        let _ = actor
+            .handle(
+                &ctx,
+                DiscoveryEvent::PeerConnected {
+                    peer: other_peer,
+                    address: direct_addr(other_peer),
+                    relayed: true,
+                },
+            )
+            .await;
+
+        assert_eq!(
+            **destination.load(),
+            Some(relay_peer),
+            "a relayed connection is not a reason to rotate the active exit"
+        );
+    }
+
+    /// A hand-picked peer becomes the active exit and surfaces as `Manual`.
+    #[tokio::test]
+    async fn select_peer_switches_active_destination() {
+        let exit = peer();
+        let (net_tx, net_rx) = mpsc::channel::<NetworkCommand>(16);
+        let (ev_tx, mut ev_rx) = mpsc::channel::<Events>(64);
+        tokio::spawn(fake_network(net_rx, exit, direct_addr(exit)));
+        let ctx = context(
+            NetworkHandle::new(net_tx),
+            ChannelSink::new(ev_tx),
+            test_config(),
+        );
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let destination: DestinationHandle = Arc::new(ArcSwap::from_pointee(None));
+        let mut destinations = HashMap::new();
+        destinations.insert(1080u16, destination.clone());
+        let mut actor = DiscoveryActor::new(
+            crate::adapters::file_sticky::FileStickyStore::load(dir.path().join("sticky.json")),
+            destinations,
+        );
+
+        let _ = actor
+            .handle(
+                &ctx,
+                DiscoveryEvent::SelectPeer {
+                    port: 1080,
+                    peer_id: exit,
+                },
+            )
+            .await;
+
+        assert_eq!(**destination.load(), Some(exit), "manual pick adopted");
+        let mut saw_manual = false;
+        while let Ok(event) = ev_rx.try_recv() {
+            if let Events::ActiveDestination {
+                peer: Some(p),
+                source: Some(DestinationSource::Manual),
+                ..
+            } = event
+                && p == exit
+            {
+                saw_manual = true;
+            }
+        }
+        assert!(saw_manual, "ActiveDestination(Manual) surfaced to the TUI");
     }
 }

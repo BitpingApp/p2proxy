@@ -16,9 +16,21 @@ pub enum DiscoveryEvent {
     /// runs an incompatible forwarder). Forget it from every pool and rediscover
     /// — never reconnect to it.
     PeerUnusable(PeerId),
-    PeerConnectedDirect {
+    /// A peer's connection came up, on every `ConnectionEstablished` (including
+    /// the DCUtR upgrade that turns a relayed circuit into a direct link).
+    /// `relayed` is taken from the connection endpoint so discovery can track
+    /// which exits are direct and rotate off relay-only ones.
+    PeerConnected {
         peer: PeerId,
         address: Multiaddr,
+        relayed: bool,
+    },
+    /// The operator hand-picked an exit peer for a server from the NETWORK tab.
+    /// Switches the active destination to that peer, reusing the normal switch
+    /// path — no new locked state.
+    SelectPeer {
+        port: u16,
+        peer_id: PeerId,
     },
 }
 
@@ -57,10 +69,21 @@ impl DiscoveryHandle {
         let _ = self.tx.send(DiscoveryEvent::PeerUnusable(peer)).await;
     }
 
-    pub async fn peer_connected_direct(&self, peer: PeerId, address: Multiaddr) {
+    pub async fn peer_connected(&self, peer: PeerId, address: Multiaddr, relayed: bool) {
         let _ = self
             .tx
-            .send(DiscoveryEvent::PeerConnectedDirect { peer, address })
+            .send(DiscoveryEvent::PeerConnected {
+                peer,
+                address,
+                relayed,
+            })
+            .await;
+    }
+
+    pub async fn select_peer(&self, port: u16, peer_id: PeerId) {
+        let _ = self
+            .tx
+            .send(DiscoveryEvent::SelectPeer { port, peer_id })
             .await;
     }
 }

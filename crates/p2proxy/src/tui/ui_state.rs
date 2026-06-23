@@ -130,6 +130,35 @@ impl UIState {
         }
     }
 
+    /// The rotation-pool peers for `port` in render order: the FindNodes pool
+    /// merged with remembered sticky exits, sorted directly-connected-first so a
+    /// relay-only peer always sinks to the bottom. The order is independent of
+    /// which peer is active — the `▶` marker moves between rows, the rows
+    /// themselves don't reshuffle — so the cursor stays put when you switch
+    /// exits. The NETWORK peer cursor indexes into exactly this Vec, so render
+    /// and cursor never diverge.
+    pub fn ordered_pool_for(&self, port: u16) -> Vec<PeerId> {
+        let mut pool = self.server_pools.get(&port).cloned().unwrap_or_default();
+        for peer in self.sticky_pools.get(&port).into_iter().flatten() {
+            if !pool.contains(peer) {
+                pool.push(*peer);
+            }
+        }
+        pool.sort_by_key(|peer| self.pool_sort_key(*peer));
+        pool
+    }
+
+    /// Sort key (smaller sorts first/top): directly-connected peers, then
+    /// advertised candidates, with relay-only/unknown peers last — relay is
+    /// never the steady state. Stable sort keeps MRU order within a tier.
+    fn pool_sort_key(&self, peer: PeerId) -> u8 {
+        match self.peer_addresses.get(&peer).map(|a| a.source) {
+            Some(AddrSource::Direct) => 0,
+            Some(AddrSource::Candidate) => 1,
+            Some(AddrSource::Relayed) | None => 2,
+        }
+    }
+
     /// Record an address for `peer`, keeping only the most authoritative one
     /// seen — a lower-priority source never overwrites a higher one.
     pub fn note_peer_address(&mut self, peer: PeerId, addr: Multiaddr, source: AddrSource) {

@@ -12,9 +12,9 @@ use protocols::models::v1::{Bandwidth, Exclusions};
 
 use super::requirements::requirements_from_filters;
 use proxy_core::domain::selection::destination_peer_ids;
-use proxy_core::ports::{DialError, DirectoryError};
 use proxy_core::events::{ConnectionEvents, Events, PoolPeer};
 use proxy_core::ports::{Actor, EventSink};
+use proxy_core::ports::{DialError, DirectoryError};
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::oneshot;
 use tokio::time::Instant;
@@ -216,10 +216,10 @@ impl NetworkActor {
                     address: address.clone(),
                     relayed,
                 });
-                if !relayed && peer_id != ctx.bootstrap_peer_id {
+                if peer_id != ctx.bootstrap_peer_id {
                     let discovery = ctx.discovery.clone();
                     tokio::spawn(async move {
-                        discovery.peer_connected_direct(peer_id, address).await;
+                        discovery.peer_connected(peer_id, address, relayed).await;
                     });
                 }
             }

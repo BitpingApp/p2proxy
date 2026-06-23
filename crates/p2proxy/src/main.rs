@@ -6,8 +6,8 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use clap::Parser;
 use color_eyre::eyre::{Context, Result};
-use libp2p::identity::Keypair;
 use libp2p::PeerId;
+use libp2p::identity::Keypair;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use proxy_core::config::Config;
 use proxy_core::events::Events;
@@ -17,7 +17,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::level_filters::LevelFilter;
 use tracing_error::ErrorLayer;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
+use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
 mod adapters;
 mod args;
@@ -26,17 +26,17 @@ mod tui;
 mod utils;
 
 use adapters::channel_sink::ChannelSink;
-use adapters::file_sticky::{default_sticky_path, FileStickyStore};
+use adapters::file_sticky::{FileStickyStore, default_sticky_path};
 use adapters::grpc_auth::GrpcAuth;
-use adapters::keypair_identity::{load_or_generate_keypair, KeypairIdentity};
+use adapters::keypair_identity::{KeypairIdentity, load_or_generate_keypair};
 use adapters::tokio_clock::TokioClock;
 use args::Cli;
-use runtime::discovery::{DestinationHandle, DiscoveryActor, DiscoveryEvent, DiscoveryHandle};
-use runtime::network::{bootstrap, NetworkActor, NetworkCommand, NetworkHandle};
-use runtime::session::{SessionContext, SessionSupervisor};
-use runtime::stream_manager::PeerStreamManager;
 use runtime::Context as AppContext;
 use runtime::Runtime;
+use runtime::discovery::{DestinationHandle, DiscoveryActor, DiscoveryEvent, DiscoveryHandle};
+use runtime::network::{NetworkActor, NetworkCommand, NetworkHandle, bootstrap};
+use runtime::session::{SessionContext, SessionSupervisor};
+use runtime::stream_manager::PeerStreamManager;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -75,8 +75,9 @@ async fn main() -> Result<()> {
     } else {
         let shutdown = shutdown.clone();
         let config = config.clone();
+        let discovery = DiscoveryHandle::new(disc_tx.clone());
         tasks.spawn(async move {
-            let result = tui::Ui::run_ui(events_rx, shutdown.clone(), config).await;
+            let result = tui::Ui::run_ui(events_rx, discovery, shutdown.clone(), config).await;
             shutdown.cancel();
             result
         });
